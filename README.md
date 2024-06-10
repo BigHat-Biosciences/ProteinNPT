@@ -2,6 +2,13 @@
 
 This is the official code repository for the paper ["ProteinNPT: Improving Protein Property Prediction and Design with Non-Parametric Transformers"](https://papers.nips.cc/paper_files/paper/2023/hash/6a4d5d85f7a52f062d23d98d544a5578-Abstract-Conference.html)
 
+## TODO (Adapting to BigHat dataset)
+- [ ] Transform BigHat datasets into the format expected by the model (see [sample](sample_data.csv))
+- [ ] Compute MSA and MSA weights for the BigHat dataset aligned to the seed sequence
+- [ ] Compute embeddings for the entire dataset using MSA transformer
+- [ ] Maybe compute zero-shot fitness predictions for auxiliary label target
+- [ ] Train ProteinNPT model
+
 ## Overview
 ProteinNPT is a semi-supervised conditional pseudo-generative model for protein property prediction and design.
 It is a variant of [Non-Parametric Transformers](https://arxiv.org/abs/2106.02584) which learns a joint representation of full input batches of protein sequences and associated property labels.
