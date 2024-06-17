@@ -1,6 +1,6 @@
 # This config file contains the paths to all relevant data objects used by the ProteinNPT codebase. Only the next two lines should be updated based on your particular setup
-export proteinnpt_data_path="/Users/slu/projects/bh-experimental/wizard_hat/conditional_plm/res/datasets/protnpt/ProteinNPT_data"
-export proteinnpt_repo_path="/Users/slu/projects/bh-experimental/wizard_hat/conditional_plm/src/protnpt"
+export proteinnpt_data_path="/home/ec2-user/other/slu/projects/bh-experimental/wizard_hat/conditional_plm/res/datasets/protnpt/ProteinNPT_data"
+export proteinnpt_repo_path="/home/ec2-user/other/slu/projects/bh-experimental/wizard_hat/conditional_plm/src/protnpt"
 
 # Reference files for substitution and indel assays
 export DMS_reference_file_path_subs=$proteinnpt_repo_path/proteinnpt/utils/proteingym/DMS_substitutions.csv
