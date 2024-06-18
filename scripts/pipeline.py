@@ -43,7 +43,8 @@ def parse_args():
     parser.add_argument('--ESM_zero_shot_scoring_strategy', default='masked-marginals', type=str, help='Masking strategy to compute ESM zero-shot predictions')
     parser.add_argument('--deactivate_zero_shot_prediction', action='store_true', help='Whether to deactivate use of zero-shot fitness predictions as auxiliary labels')
     parser.add_argument("--use_cpu", action="store_true", help="Force the use of CPU instead of GPU (considerably slower). If this option is not chosen, the script will raise an error if the GPU is not available.")
-
+    parser.add_argument("--run_local", action="store_true", help="Run the training locally without logging to wandb")
+    
     args = parser.parse_args()
     return args
 
@@ -108,7 +109,7 @@ if __name__ == "__main__":
             _ = MSA_processing(
                     MSA_location=args.MSA_location,
                     theta=args.MSA_sequence_weights_theta,
-                    use_weights=True,
+                    use_weights=False,
                     weights_location=MSA_sequence_weights_location
             )
 
@@ -314,4 +315,5 @@ if __name__ == "__main__":
     if args.MSA_start: training_run_parameters += "--MSA_start {} ".format(args.MSA_start)
     if args.MSA_end: training_run_parameters += "--MSA_end {} ".format(args.MSA_end)
     if args.indel_mode: training_run_parameters += "--indel_mode"
+    if not args.run_local: training_run_parameters += "--use_wandb"
     subprocess.run("python train.py "+training_run_parameters, check=True, shell=True)

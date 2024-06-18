@@ -60,7 +60,6 @@ def get_train_val_test_data(args, assay_file_names):
             main_target_name_count+=1
     assert main_target_name is not None, "No main target referenced. Please update config to select a unique main target."
     assert main_target_name_count <= 1, "Several main targets referenced. Please update config to select a unique main target."
-    
     assay_data[main_target_name] = pd.read_csv(args.target_config[main_target_name]["location"] + os.sep + assay_file_names[main_target_name]) 
     assay_data[main_target_name] = cleanup_ids_assay_data(assay_data[main_target_name])[['mutant','mutated_sequence',args.target_config[main_target_name]["var_name"],args.fold_variable_name]]
     assay_data[main_target_name].columns = ['mutant','mutated_sequence', main_target_name, args.fold_variable_name]

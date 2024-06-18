@@ -234,7 +234,7 @@ def create_parser():
 
 def label_row(row, sequence, token_probs, alphabet, offset_idx):
     score=0
-    for mutation in row.split(":"):
+    for mutation in str(row).split(":"):
         wt, idx, mt = mutation[0], int(mutation[1:-1]) - offset_idx, mutation[-1]
         assert sequence[idx] == wt, "The listed wildtype does not match the provided sequence"
 
@@ -335,6 +335,7 @@ def main(args):
     
     if len(df) == 0:
         raise ValueError("No rows found in the dataframe")
+    df = df.dropna(subset=[args.mutation_col])
     print(f"df shape: {df.shape}", flush=True)
 
     # inference for each model

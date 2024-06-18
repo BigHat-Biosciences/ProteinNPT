@@ -210,7 +210,7 @@ def main(
         model.cuda()
     #DMS file
     df = pd.read_csv(input_data_location)
-    df = cleanup_ids_assay_data(df,indel_mode=args.indel_mode, target_seq=target_seq)
+    df = cleanup_ids_assay_data(df,indel_mode=indel_mode, target_seq=target_seq)
     df = df[['mutant','mutated_sequence']]
 
     # Path to the output file for storing embeddings and original sequences
@@ -262,7 +262,7 @@ def main(
     # For Tranception, utils for slicing already exist so we directly process & tokenize sequences below
     if model_type=="MSA_Transformer" or model_type.startswith("ESM"):
         dataset_dict = {}
-        dataset_dict['mutant_mutated_seq_pairs'] = list(zip(list(df['mutant']),list(df['mutated_sequence'])))
+        dataset_dict['mutant_mutated_seq_pairs'] = list(zip(list(map(str, df['mutant'])),list(df['mutated_sequence'])))
         dataset = Dataset.from_dict(dataset_dict)
         dataloader = DataLoader(
                         dataset=dataset, 
@@ -365,13 +365,13 @@ def main(
                 tokens = processed_batch['input_tokens']
                 assert tokens.ndim == 2, "Finding dimension of tokens to be: {}".format(tokens.ndim)
                 batch_size, seqlen = tokens.size()
-                if args.model_type=="ESM1v":
+                if model_type=="ESM1v":
                     last_layer_index = 33
-                elif args.model_type=="ESM2_15B":
+                elif model_type=="ESM2_15B":
                     last_layer_index = 48
-                elif args.model_type=="ESM2_3B":
+                elif model_type=="ESM2_3B":
                     last_layer_index = 36
-                elif args.model_type=="ESM2_650M":
+                elif model_type=="ESM2_650M":
                     last_layer_index = 33
                 output = model(tokens, repr_layers=[last_layer_index])
                 embeddings = output["representations"][last_layer_index][:] # N, L, D
@@ -460,4 +460,5 @@ if __name__ == "__main__":
         target_seq=args.target_seq,
         MSA_location=args.MSA_location,
         use_cpu=args.use_cpu,
+        args=args
     )

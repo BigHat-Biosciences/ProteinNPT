@@ -3,6 +3,7 @@
 This is the official code repository for the paper ["ProteinNPT: Improving Protein Property Prediction and Design with Non-Parametric Transformers"](https://papers.nips.cc/paper_files/paper/2023/hash/6a4d5d85f7a52f062d23d98d544a5578-Abstract-Conference.html)
 
 ## TODO (Adapting to BigHat dataset)
+- [x] Setup environment
 - [ ] Transform BigHat datasets into the format expected by the model (see [sample](sample_data.csv))
 - [ ] Compute MSA and MSA weights for the BigHat dataset aligned to the seed sequence
 - [ ] Compute embeddings for the entire dataset using MSA transformer

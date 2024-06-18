@@ -329,7 +329,7 @@ def compute_sequence_weights(MSA_filename, MSA_weights_filename):
     """
     processed_MSA = MSA_processing(
         MSA_location=MSA_filename,
-        use_weights=True,
+        use_weights=False,
         weights_location=MSA_weights_filename
     )
     #print("Neff: "+str(processed_MSA.Neff))
