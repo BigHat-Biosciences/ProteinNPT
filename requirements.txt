@@ -78,6 +78,6 @@ triton==2.2.0
 typing_extensions==4.9.0
 tzdata==2023.4
 urllib3==2.2.0
-wandb
+wandb==0.16.3
 xxhash==3.4.1
 yarl==1.9.4
