@@ -44,7 +44,8 @@ def parse_args():
     parser.add_argument('--deactivate_zero_shot_prediction', action='store_true', help='Whether to deactivate use of zero-shot fitness predictions as auxiliary labels')
     parser.add_argument("--use_cpu", action="store_true", help="Force the use of CPU instead of GPU (considerably slower). If this option is not chosen, the script will raise an error if the GPU is not available.")
     parser.add_argument("--run_local", action="store_true", help="Run the training locally without logging to wandb")
-    
+    parser.add_argument("--early_stopping_patience", default=None, type=int, help="Number of epochs without improvement before stopping training")
+
     args = parser.parse_args()
     return args
 
@@ -314,6 +315,9 @@ if __name__ == "__main__":
         )
     if args.MSA_start: training_run_parameters += "--MSA_start {} ".format(args.MSA_start)
     if args.MSA_end: training_run_parameters += "--MSA_end {} ".format(args.MSA_end)
-    if args.indel_mode: training_run_parameters += "--indel_mode"
-    if not args.run_local: training_run_parameters += "--use_wandb"
+    if args.indel_mode: training_run_parameters += "--indel_mode "
+    if not args.run_local: training_run_parameters += "--use_wandb "
+    if args.early_stopping_patience: training_run_parameters += "--early_stopping_patience {} ".format(args.early_stopping_patience)
+    training_run_parameters += "--use_validation_set "
+    training_run_parameters += "--num_total_training_steps 50000 "
     subprocess.run("python train.py "+training_run_parameters, check=True, shell=True)

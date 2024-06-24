@@ -12,6 +12,7 @@ from scipy.stats import spearmanr
 
 from .data_utils import collate_fn_protein_npt
 
+
 def get_parameter_names(model, forbidden_layer_types):
     """
     Returns the names of the model parameters that are not inside a forbidden layer. 
@@ -204,6 +205,7 @@ class Trainer():
                 if self.args.training_fp16:
                     with torch.cuda.amp.autocast():
                         if self.model.model_type=="ProteinNPT":
+                            breakpoint()
                             output = self.model(
                                 tokens=processed_batch['masked_tokens'],
                                 targets=processed_batch['masked_targets'],
@@ -352,9 +354,23 @@ class Trainer():
                 average_spearman_across_targets /= len(self.model.target_names)
                 print(" | ".join([key + ": "+str(round(eval_logs[key],5)) for key in eval_logs.keys()]))
                 if self.args.use_wandb: wandb.log(eval_logs)
+
                 # Early stopping
                 all_spearmans_eval_during_training.append(average_spearman_across_targets)
-                if average_spearman_across_targets > max_average_spearman_across_targets: max_average_spearman_across_targets = average_spearman_across_targets
+                if average_spearman_across_targets > max_average_spearman_across_targets:
+                    max_average_spearman_across_targets = average_spearman_across_targets
+                    if not os.path.exists(self.args.model_location): os.mkdir(self.args.model_location)
+                    if not os.path.exists(self.args.model_location + os.sep + 'checkpoint-best-spearman'):
+                        os.mkdir(self.args.model_location + os.sep + 'checkpoint-best-spearman')
+                    torch.save({
+                        'training_step': training_step,
+                        'args': self.args,
+                        'state_dict': self.model.state_dict(),
+                        'optimizer' : optimizer.state_dict()
+                        }, 
+                        self.args.model_location + os.sep + 'checkpoint-best-spearman' + os.sep + 'checkpoint.t7'
+                    )
+
                 if (training_step >= 1000) and (self.args.early_stopping_patience is not None) and (np.array(all_spearmans_eval_during_training)[-self.args.early_stopping_patience:].max() < max_average_spearman_across_targets):
                     print("Early stopping. Training step: {}. Total eval loss: {}. Avg spearman: {}".format(training_step, eval_results['eval_total_loss'], average_spearman_across_targets))
                     break
@@ -404,7 +420,7 @@ class Trainer():
                 row_attentions=[]
 
             for batch in tqdm.tqdm(eval_iterator):
-                if output_all_predictions: 
+                if output_all_predictions:
                     output_scores['mutated_sequence'] += list(zip(*batch['mutant_mutated_seq_pairs']))[1]
                     output_scores['mutant'] += list(zip(*batch['mutant_mutated_seq_pairs']))[0]
                 if self.model.model_type=="ProteinNPT":
@@ -445,7 +461,7 @@ class Trainer():
                     del processed_batch['target_labels']['zero_shot_fitness_predictions']
                 else:
                     zero_shot_fitness_predictions = None
-                
+        
                 if self.model.model_type=="ProteinNPT":
                     output = self.model(
                         tokens=processed_batch['masked_tokens'],

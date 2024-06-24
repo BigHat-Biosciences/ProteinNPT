@@ -50,6 +50,7 @@ if __name__ == "__main__":
         elif model_args.augmentation=="zero_shot_fitness_predictions_auxiliary_labels":
             model_args.target_config["zero_shot_fitness_predictions"]["location"] = zero_shot_fitness_predictions_folder
             assay_file_names[target_name] = zero_shot_fitness_predictions_filename
+
     train_data, val_data, test_data, target_processing = get_train_val_test_data(args = model_args, assay_file_names = assay_file_names)
 
     # Inference

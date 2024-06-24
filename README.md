@@ -4,11 +4,12 @@ This is the official code repository for the paper ["ProteinNPT: Improving Prote
 
 ## TODO (Adapting to BigHat dataset)
 - [x] Setup environment
-- [ ] Transform BigHat datasets into the format expected by the model (see [sample](sample_data.csv))
-- [ ] Compute MSA and MSA weights for the BigHat dataset aligned to the seed sequence
-- [ ] Compute embeddings for the entire dataset using MSA transformer
-- [ ] Maybe compute zero-shot fitness predictions for auxiliary label target
-- [ ] Train ProteinNPT model
+- [x] Transform BigHat datasets into the format expected by the model (see [sample](sample_data.csv))
+- [x] Compute MSA and MSA weights for the BigHat dataset aligned to the seed sequence
+- [x] Compute embeddings for the entire dataset using MSA transformer
+- [x] Maybe compute zero-shot fitness predictions for auxiliary label target
+- [x] Train ProteinNPT model
+- [x] Inference
 
 ## Overview
 ProteinNPT is a semi-supervised conditional pseudo-generative model for protein property prediction and design.

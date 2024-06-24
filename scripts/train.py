@@ -249,7 +249,9 @@ def main(args):
         MSA_weights_filename = args.MSA_sequence_weights_filename
         MSA_start_position = args.MSA_start
         MSA_end_position = args.MSA_end
+    
     train_data, val_data, test_data, target_processing = get_train_val_test_data(args = args, assay_file_names = assay_file_names)
+
     if args.aa_embeddings == "MSA_Transformer":
         MSA_sequences, MSA_weights = process_MSA(
             MSA_data_folder=args.MSA_data_folder,
@@ -361,7 +363,7 @@ if __name__ == "__main__":
     #Model parameters
     parser.add_argument('--model_type', default=None, type=str, help='Model type')
     parser.add_argument('--model_name_suffix', default=None, type=str, help='Suffix to reference model')
-    parser.add_argument('--sequence_embeddings_folder', required=True, type=str, help='Location of stored embeddings on disk')
+    parser.add_argument('--sequence_embeddings_folder', required=False, type=str, help='Location of stored embeddings on disk')
     parser.add_argument('--embedding_model_location', default=None, type=str, help='Location of model used to embed protein sequences')
     parser.add_argument('--aa_embeddings', default=None, type=str, help='Type of protein sequence embedding [MSA_Transformer|Tranception|ESM1v|ESM2|Linear_embedding]')
     parser.add_argument('--long_sequences_slicing_method', default='center', type=str, help='Method to slice long sequences [rolling, center, left]. We do not slice OHE input')
@@ -395,7 +397,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_MSA_sequences_per_training_instance', default=None, type=int, help='Number of MSA sequences to be leveraged during training')
     parser.add_argument('--num_MSA_sequences_per_eval_instance', default=None, type=int, help='Number of MSA sequences to be leveraged at evaluation time')
     parser.add_argument('--max_tokens_per_msa', default=2**14, type=int, help='Used during inference to batch attention computations in a single forward pass. This allows increased input sizes with less memory.')
-    parser.add_argument('--early_stopping_patience', default=5, type=int, help='Number of consecutive evals for which the loss has to not go below the min value to call early stopping (if None, no early stopping)')
+    parser.add_argument('--early_stopping_patience', default=None, type=int, help='Number of consecutive evals for which the loss has to not go below the min value to call early stopping (if None, no early stopping)')
     parser.add_argument('--max_learning_rate', default=3e-4, type=float, help='Max learning rate after warmup')
     parser.add_argument('--min_learning_rate', default=1e-5, type=float, help='Min learning rate post warmup and cosine decline')
     parser.add_argument('--adam_beta1', default=0.9, type=float, help='Beta1 value in AdamW optimizer')

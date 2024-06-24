@@ -80,7 +80,7 @@ def get_train_val_test_data(args, assay_file_names):
         merge = pd.merge(merge,zero_shot_fitness_predictions,how='left',on='mutant')
 
     train_val_test_splits = split_data_based_on_test_fold_index(
-        dataframe = merge, 
+        dataframe = merge,
         fold_variable_name = args.fold_variable_name,
         test_fold_index = args.test_fold_index,
         use_validation_set = args.use_validation_set
