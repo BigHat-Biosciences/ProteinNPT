@@ -1,5 +1,6 @@
 **/__pycache__/
 *.out
+secrets.env
 slurm
 archives
 output
