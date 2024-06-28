@@ -260,9 +260,9 @@ def main(args):
     ############################# GET TRAINING DATA #############################
     
     if args.use_wandb:
-        wandb.login()
+        # wandb.login(key=os.getenv("WANDB_API_KEY"))
         combined_dict = {**vars(args), "parameter_count": sum(p.numel() for p in model.parameters()), "assay_id": assay_id }
-        wandb.init(project=os.getenv("WANDB_PROJECT"), config=combined_dict, name=model_name, dir=args.wandb_location, save_code=True)
+        wandb.init(project="protnpt", config=combined_dict, name=model_name, dir=args.wandb_location, save_code=True)
     
     ############################# TRAINING #############################
     print("Starting training")
