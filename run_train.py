@@ -10,7 +10,13 @@ from proteinnpt.proteinnpt.model import ProteinNPTModel
 from proteinnpt.baselines.model import AugmentedPropertyPredictor
 from proteinnpt.utils.esm.data import Alphabet
 from proteinnpt.utils.tranception.model_pytorch import get_tranception_tokenizer
-from proteinnpt.utils.data_utils import get_train_val_test_data, standardize, pnpt_count_non_nan, pnpt_spearmanr
+from proteinnpt.utils.data_utils import (
+    get_train_val_test_data,
+    create_seed_val_data,
+    standardize,
+    pnpt_count_non_nan,
+    pnpt_spearmanr
+)
 from proteinnpt.utils.msa_utils import process_MSA
 from proteinnpt.utils.model_utils import Trainer
 
@@ -27,6 +33,8 @@ zero_shot_predictions_mapping={
 
 
 def str2bool(v):
+    if isinstance(v, list):
+        return [str2bool(x) for x in v]
     if isinstance(v, bool):
         return v
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -59,15 +67,18 @@ def setup_config_and_paths(args):
     args.path_to_hhfilter = os.path.join(args.input_dir, args.path_to_hhfilter)
     args.MSA_data_folder = os.path.join(args.input_dir, args.MSA_data_folder)                               # Same as output_dir
     args.MSA_weight_data_folder = os.path.join(args.input_dir, args.MSA_weight_data_folder)                 # Same as output_dir
-    args.MSA_location = os.path.join(args.input_dir, args.MSA_location)                                     # .a2m file
+    
+    if args.MSA_location is not None:
+        args.MSA_location = os.path.join(args.input_dir, args.MSA_location)                                     # .a2m file
 
-    args.sequence_embeddings_folder = os.path.join(args.input_dir, args.sequence_embeddings_folder)
-    args.sequence_embeddings_location = os.path.join(                                                       # .h5 file
-        args.input_dir,
-        args.sequence_embeddings_folder,
-        args.sequence_embeddings_location
-    )
-
+    if args.sequence_embeddings_folder is not None and args.sequence_embeddings_location is not None:
+        args.sequence_embeddings_folder = os.path.join(args.input_dir, args.sequence_embeddings_folder)
+        args.sequence_embeddings_location = os.path.join(                                                       # .h5 file
+            args.input_dir,
+            args.sequence_embeddings_folder,
+            args.sequence_embeddings_location
+        )
+    
     ############################# SETUP MODEL CONFIG #############################
     if args.model_config_location is not None:
         args.main_config=json.load(open(args.model_config_location))
@@ -82,9 +93,9 @@ def setup_config_and_paths(args):
     args.target_config=json.load(open(f"{args.target_config_location}"))
     args.augmentation_short="none"
 
-    if args.model_type=="ProteinNPT":
+    if args.model_type=="ProteinNPT" and args.augmentation != "None":
         zero_shot_predictions_mapping["ProteinNPT"] = zero_shot_predictions_mapping[args.aa_embeddings+"_pred"]
-
+    
     # Add auxiliary label to target_config (model will predict this target in addition to main target(s))
     if args.augmentation=="zero_shot_fitness_predictions_auxiliary_labels":
         print("Using zero-shot fitness predictions as auxiliary labels")
@@ -244,8 +255,13 @@ def main(args):
     MSA_start_position = args.MSA_start
     MSA_end_position = args.MSA_end
     
-    train_data, val_data, test_data, target_processing = get_train_val_test_data(args = args, assay_file_names = assay_file_names)
-
+    train_data, val_data, test_data, target_processing = get_train_val_test_data(
+        args = args,
+        assay_file_names = assay_file_names,
+        metadata_cols = args.metadata_cols,
+    )
+    val_seed_data = create_seed_val_data(args, target_processing, n=1000)
+    
     if args.aa_embeddings == "MSA_Transformer":
         MSA_sequences, MSA_weights = process_MSA(
             MSA_data_folder=args.MSA_data_folder,
@@ -260,7 +276,7 @@ def main(args):
     ############################# GET TRAINING DATA #############################
     
     if args.use_wandb:
-        # wandb.login(key=os.getenv("WANDB_API_KEY"))
+        # wandb.login(key=os.getenv("WANDB_API_KEY"))   # No need for this as wandb.init() pulls the key from the environment
         combined_dict = {**vars(args), "parameter_count": sum(p.numel() for p in model.parameters()), "assay_id": assay_id }
         wandb.init(project="protnpt", config=combined_dict, name=model_name, dir=args.wandb_location, save_code=True)
     
@@ -271,6 +287,7 @@ def main(args):
             args=args,
             train_data=train_data, 
             val_data=val_data,
+            val_seed_data=val_seed_data,
             MSA_sequences=MSA_sequences, 
             MSA_weights=MSA_weights,
             MSA_start_position=MSA_start_position,
@@ -352,8 +369,6 @@ def main(args):
     return test_eval_results['output_scores'], perf_list, model_name_prefix, spearmans
 
 
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train ProteinNPT or baseline model')
     
@@ -383,21 +398,26 @@ if __name__ == "__main__":
         help='Directory where target config files are stored'
     )
     
-    parser.add_argument('--assay_data_location', default="tm.csv", type=str, help='Path to assay data file')
+    parser.add_argument('--assay_data_location', default="datum.csv", type=str, help='Path to assay data file')
+    parser.add_argument('--metadata_cols', default=[], type=str, nargs='+', help='Columns to use as metadata')
     parser.add_argument('--model_config_name', default="model_config.json", type=str, help='Model configuration file name')
     parser.add_argument('--target_config_name', default="target_config.json", type=str, help='Target configuration file name')
 
     parser.add_argument('--MSA_sequence_weights_filename', default="aligned_sequences_hhfiltered_cov_75_maxid_90_minid_0.a2m", type=str, help='Sequence weights in MSA')
     parser.add_argument('--MSA_weight_data_folder', default="", type=str, help='Folder where MSA sequence weights are stored (for diversity sampling of MSA)')
     parser.add_argument('--MSA_data_folder', default="", type=str, help='Folder all MSAs are stored for reference sequence of ProteinGym assays')
-    parser.add_argument('--MSA_location', default="aligned_sequences.a2m", type=str, help='Path to MSA file (expects .a2m)')
+    parser.add_argument('--MSA_location', default=None, type=str, help='Path to MSA file (expects .a2m)')
     parser.add_argument('--path_to_hhfilter', default="hhfiltered", type=str, help='Path to hhfilter (for filtering MSA)')
     
-    parser.add_argument('--sequence_embeddings_location', default="msat.h5", type=str, help='Actual location of sequence embeddings .h5 file')
-    parser.add_argument('--sequence_embeddings_folder', default="embeddings", required=False, type=str, help='Folder with embeddings')
+    parser.add_argument('--sequence_embeddings_location', default=None, type=str, help='Actual location of sequence embeddings .h5 file')
+    parser.add_argument('--sequence_embeddings_folder', default=None, required=False, type=str, help='Folder with embeddings')
     
     parser.add_argument('--embedding_model_location', default=None, type=str, help='Location of model used to embed protein sequences')
     parser.add_argument('--zero_shot_fitness_predictions_location', default=None, type=str, help='Path to zero-shot fitness predictions used as additional covariates (baselines) or auxiliary labels (ProteinNPT)')
+    
+    parser.add_argument('--target_seq', default=None, type=str, help='WT sequence mutated in the assay')
+    parser.add_argument('--target_seq_mutable_mask', default=None, type=str2bool, nargs='+', help='Mask of mutable positions in the target sequence')
+    parser.add_argument('--target_seq_cdr_mask', default=None, type=str, nargs='+', help='Mask of CDR positions in the target sequence')
     ############################# SAGEMAKER PARAMETERS #############################
     
     # Data parameters
@@ -457,9 +477,9 @@ if __name__ == "__main__":
     parser.add_argument('--use_wandb', type=str2bool, nargs='?', const=True, default=False, help='Whether to log runs in wandb')
     
     # No reference file
-    parser.add_argument('--target_seq', default=None, type=str, help='WT sequence mutated in the assay')
     parser.add_argument('--MSA_start', default=None, type=int, help='Index of first AA covered by the MSA relative to target_seq coordinates (1-indexing)')
     parser.add_argument('--MSA_end', default=None, type=int, help='Index of last AA covered by the MSA relative to target_seq coordinates (1-indexing)')
+    
     args = parser.parse_args()
 
     setup_config_and_paths(args)
@@ -471,5 +491,31 @@ if __name__ == "__main__":
         args.MSA_start = 1
         if args.target_seq:
             args.MSA_end = len(args.target_seq)
-        
+    
+    # TODO: Unhardcode the target sequence and target mask
+    args.target_seq = "KVQLVES-GGGVVQPGGSLRLSCAASG-FSFRN-----FGMSWVRQAPGKGPEWVSAISGS---GADTLYASPVKGRFIISRDNAKNTLYLQMNSLRPEDTAVYYCTIGGS------------------------LTRSSQGTLVTVSS---"
+    args.target_seq_mutable_mask = [True, True, True, True, True, True, True, False, True, True, True, True, True, \
+                                    True, True, True, True, True, True, True, True, True, True, True, True, True, \
+                                    True, False, True, True, True, True, True, False, False, False, False, False, True, \
+                                    True, True, True, True, True, True, True, True, True, True, True, True, True, True, \
+                                    True, True, True, True, True, True, True, True, False, False, False, True, True, True, \
+                                    False, True, False, True, True, True, True, False, False, True, True, True, True, True, \
+                                    True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, \
+                                    True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, \
+                                    False, False, False, False, False, False, False, False, False, False, False, False, False, \
+                                    False, False, False, False, False, False, False, False, False, False, False, True, True, \
+                                    True, True, True, True, True, True, True, True, True, True, True, True, False, False, False]
+    args.target_seq_cdr_mask = cdr_mask = [False, False, False, False, False, False, False, False, False, False, False, \
+                                            False, False, False, False, False, False, False, False, False, False, False, \
+                                            False, False, False, True, True, True, True, True, True, True, True, True, True, \
+                                            False, False, False, False, False, False, False, False, False, False, False, \
+                                            False, False, False, True, True, True, True, True, True, True, True, True, True, \
+                                            True, True, True, True, True, True, True, False, False, False, False, False, \
+                                            False, False, False, False, False, False, False, False, False, False, False, \
+                                            False, False, False, False, False, False, False, False, False, False, False, \
+                                            False, False, False, True, True, True, True, True, True, True, True, False, \
+                                            False, False, False, False, False, False, False, False, False, False]
+    assert len(args.target_seq) == len(args.target_seq_mutable_mask), \
+        "Target sequence, mutable mask and CDR mask must have the same length"
+
     main(args)
