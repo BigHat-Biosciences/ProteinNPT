@@ -47,6 +47,7 @@ def process_batch(
     num_training_sequences = None,
     proba_target_mask = 0.15,
     proba_aa_mask = 0.15,
+    mask_training_aa = True,
     aa_can_mask = None,
     eval_mode = True,
     start_idx=1,
@@ -221,6 +222,8 @@ def process_batch(
         batch_token_sequences = torch.tensor(model.alphabet(sequence, add_special_tokens=True, truncation=True, padding=True, max_length=model.aa_embedding.config.n_ctx)['input_ids'])
         
     # Mask protein sequences
+    rows_cannot_mask = None if mask_training_aa else\
+        np.arange(number_of_mutated_seqs_to_score, batch_token_sequences.shape[0])
     batch_masked_tokens, batch_token_labels, masked_indices = mask_protein_sequences(
         inputs = batch_token_sequences,
         alphabet = alphabet,
@@ -228,6 +231,7 @@ def process_batch(
         proba_random_mutation = 0.1, 
         proba_unchanged = 0.1,
         aa_can_mask = aa_can_mask,
+        rows_cannot_mask=rows_cannot_mask
     )
     if args.sequence_embeddings_location is not None:
         if sequence_embeddings.shape[1] > masked_indices.shape[1]: # When dealing with sequences of different sizes, and sequences in batch happen to be all smaller than longest sequence in assay for which we computed embeddings

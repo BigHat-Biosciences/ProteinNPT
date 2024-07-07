@@ -31,6 +31,7 @@ def get_parameter_names(model, forbidden_layer_types):
 
 def get_learning_rate(training_step, num_warmup_steps=1000, num_total_training_steps=20000, max_learning_rate=3e-4, min_learning_rate=3e-5):
     """
+    Cosine learning rate scheduler with warmup.
     """
     if training_step <= num_warmup_steps:
         lr = (max_learning_rate * training_step) / num_warmup_steps
@@ -546,7 +547,7 @@ class Trainer():
                 num_eval_batches += 1
                 eval_total_loss += batch_loss.item()
                 if self.model.model_type=="ProteinNPT":
-                    num_masked_tokens_in_batch = (~processed_batch['token_labels'].eq(100)).sum().item()  #processed_batch['masked_tokens'].eq(self.model.alphabet.mask_idx).sum().item()
+                    num_masked_tokens_in_batch = (processed_batch['masked_tokens'].eq(self.model.alphabet.mask_idx)).sum().item()
                     eval_num_masked_tokens += num_masked_tokens_in_batch
                     eval_reconstruction_loss += batch_reconstruction_loss.item() * num_masked_tokens_in_batch
                     for target_name in self.model.target_names:
@@ -597,8 +598,9 @@ class Trainer():
             eval_results['row_attentions'] = torch.stack(row_attentions, dim=0).cpu().numpy()
         
         if self.model.model_type=="ProteinNPT":
-            eval_results['eval_reconstruction_loss'] = eval_reconstruction_loss / eval_num_masked_tokens
-            eval_results['eval_num_masked_tokens'] = eval_num_masked_tokens
+            if eval_num_masked_tokens > 0:
+                eval_results['eval_reconstruction_loss'] = eval_reconstruction_loss / eval_num_masked_tokens
+                eval_results['eval_num_masked_tokens'] = eval_num_masked_tokens
             eval_results['eval_num_masked_targets'] = eval_num_masked_targets
         else:
             eval_results['eval_num_predicted_targets'] = num_predicted_targets
@@ -619,6 +621,7 @@ class Trainer():
         target properties.
         TODO: Predicted properties are not yet implemented
         TODO: Implement a more general version of this function that can handle multiple properties
+        TODO: Implement other sampling methods
         """
         import proteinnpt
         self.model.eval()
@@ -686,6 +689,7 @@ class Trainer():
                         proba_aa_mask = proba_aa_mask,              # Mask amino acids with this probability
                         aa_can_mask=full_sample_mask,               # Only mask amino acids at these positions
                         eval_mode = True,
+                        mask_training_aa = False,                   # Do not mask training amino acids during eval
                         device=self.model.device,
                         selected_indices_seed=selected_indices_seed,
                         indel_mode=self.args.indel_mode
@@ -769,7 +773,7 @@ class Trainer():
                     new_sequences.append("".join(new_sequence))
                 
                 if self.model.model_type=="ProteinNPT":
-                    num_masked_tokens_in_batch = (~processed_batch['token_labels'].eq(100)).sum().item()  #processed_batch['masked_tokens'].eq(self.model.alphabet.mask_idx).sum().item()
+                    num_masked_tokens_in_batch = (processed_batch['masked_tokens'].eq(self.model.alphabet.mask_idx)).sum().item()
                     eval_num_masked_tokens += num_masked_tokens_in_batch
                     eval_reconstruction_loss += batch_reconstruction_loss.item() * num_masked_tokens_in_batch
                 else:
@@ -789,7 +793,7 @@ class Trainer():
         eval_results = {
             'seed_eval_total_loss': eval_total_loss / num_eval_batches,
             'seed_eval_reconstruction_loss': eval_reconstruction_loss / eval_num_masked_tokens,
-            'seed_eval_num_masked_tokens': eval_num_masked_tokens,
+            'seed_eval_avg_num_masked_tokens': eval_num_masked_tokens / num_eval_batches,
             'seed_eval_num_unique_seqs': len(unique_new_sequences),
             **num_unique_regions
         }

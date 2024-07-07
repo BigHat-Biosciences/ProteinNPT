@@ -175,7 +175,15 @@ def preprocess_test_targets(test_targets, target_config, target_processing):
             test_targets[target_name] = torch.tensor([target_processing[target_name]['category_to_index'][val] for val in test_targets[target_name]])
     return test_targets
 
-def mask_protein_sequences(inputs, alphabet, proba_aa_mask=0.15, proba_random_mutation=0.1, proba_unchanged=0.1, aa_can_mask=None):
+def mask_protein_sequences(
+    inputs,
+    alphabet,
+    proba_aa_mask=0.15,
+    proba_random_mutation=0.1,
+    proba_unchanged=0.1,
+    aa_can_mask=None,
+    rows_cannot_mask=None
+):
     """
     Masks amino acids in the MSA at random with proba proba_aa_mask (15% by default).
     inputs: batched tokens (ie., MSA post tokenization)
@@ -197,6 +205,10 @@ def mask_protein_sequences(inputs, alphabet, proba_aa_mask=0.15, proba_random_mu
         assert len(aa_can_mask) == labels.shape[-1], "aa_can_mask should have the same length as the number of columns in the input tensor"
         aa_cannot_mask = ~torch.tensor(aa_can_mask).bool()
         probability_tensor.masked_fill_(aa_cannot_mask, value=0.0)
+
+    if rows_cannot_mask is not None:
+        # Set rows not in rows_can_mask to 0 probability
+        probability_tensor[rows_cannot_mask,:] = 0.0
 
     masked_indices = torch.bernoulli(probability_tensor).bool()
     labels[~masked_indices] = -100  # We only compute loss on masked tokens (consequently, all special tokens above will be all excluded from the loss automatically --> including any token that was set to <mask> beforehand (eg., missing values))
