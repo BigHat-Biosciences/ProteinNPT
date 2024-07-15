@@ -47,6 +47,9 @@ def process_batch(
     num_training_sequences = None,
     proba_target_mask = 0.15,
     proba_aa_mask = 0.15,
+    proba_random_mutation = 0.1,
+    proba_random_unmasked_mutation = 0.0,
+    proba_unchanged = 0.1,
     mask_training_aa = True,
     aa_can_mask = None,
     eval_mode = True,
@@ -67,23 +70,26 @@ def process_batch(
     raw_sequence_length = len(batch['mutant_mutated_seq_pairs'][0][1])
     number_of_mutated_seqs_to_score = len(batch['mutant_mutated_seq_pairs'])
 
+    batch_gt_labels = {}
     batch_masked_targets = {} 
-    batch_target_labels = {} 
+    batch_target_labels = {}
     for target_name in target_names:
         if target_name not in batch: 
             if verbose: print("Target values were not passed in input batch. We assume all corresponding values are missing & to be predicted.")
             batch[target_name] = torch.tensor([np.nan] * number_of_mutated_seqs_to_score) # By construction this will set all labels to -100 in subsequent mask_targets.
             eval_mode = True
+        batch_gt_labels[target_name] = batch[target_name].clone()
         if target_name in target_names_unknown:
             # These are the targets that we actually care about and want to predict
             masked_targets, target_labels = mask_targets(
-                inputs = batch[target_name], 
-                input_target_type = args.target_config[target_name]["type"], 
-                target_processing = target_processing[target_name], 
+                inputs = batch[target_name],
+                input_target_type = args.target_config[target_name]["type"],
+                target_processing = target_processing[target_name],
                 proba_target_mask = proba_target_mask,
-                proba_random_mutation = 0.1 if not eval_mode else 0.0, #No random mutation in eval mode
-                proba_unchanged = 0.1 if not eval_mode else 0.0, #No unchanged token in eval mode (all masked)
-                min_num_labels_masked = 1 if not eval_mode else None #Masking at least one label during training to have well-defined loss
+                proba_random_unmasked_mutation = proba_random_unmasked_mutation if not eval_mode else 0.0, # No random mutation in eval mode
+                proba_random_mutation = proba_random_mutation if not eval_mode else 0.0, # No random mutation in eval mode
+                proba_unchanged = proba_unchanged if not eval_mode else 0.0, # No unchanged token in eval mode (all masked)
+                min_num_labels_masked = 1 if not eval_mode else None # Masking at least one label during training to have well-defined loss
             )
         else:
             masked_targets, target_labels = mask_targets(
@@ -100,19 +106,20 @@ def process_batch(
     if args.augmentation=="zero_shot_fitness_predictions_covariate": batch_target_labels['zero_shot_fitness_predictions'] = batch['zero_shot_fitness_predictions'].to(device) # process fitness pred as a target to make things easier
     if (training_sequences is not None):
         # num_sequences_training_data = len(training_sequences['mutant_mutated_seq_pairs'])   # This call takes time and should be passed in
-        if model.training_sample_sequences_indices is None:
-            selected_indices_dict = {}
-            num_ensemble_seeds = model.PNPT_ensemble_test_num_seeds if model.PNPT_ensemble_test_num_seeds > 0 else 1
-            for ensemble_seed in range(num_ensemble_seeds):
-                selected_indices_dict[ensemble_seed] = PNPT_sample_training_points_inference(   # This also takes time
-                    training_sequences=training_sequences,
-                    sequences_sampling_method=args.eval_training_sequences_sampling_method, 
-                    num_sampled_points=args.eval_num_training_sequences_per_batch_per_gpu,
-                    num_sequences_training_data=num_training_sequences,
-                )
-            model.training_sample_sequences_indices = selected_indices_dict
-        selected_indices = model.training_sample_sequences_indices[selected_indices_seed]
-      
+        # if model.training_sample_sequences_indices is None:
+        selected_indices_dict = {}
+        num_ensemble_seeds = model.PNPT_ensemble_test_num_seeds if model.PNPT_ensemble_test_num_seeds > 0 else 1
+        for ensemble_seed in range(num_ensemble_seeds):
+            selected_indices_dict[ensemble_seed] = PNPT_sample_training_points_inference(   # This also takes time
+                training_sequences=training_sequences,
+                sequences_sampling_method=args.eval_training_sequences_sampling_method, 
+                num_sampled_points=args.eval_num_training_sequences_per_batch_per_gpu,
+                num_sequences_training_data=num_training_sequences,
+            )
+            # model.training_sample_sequences_indices = selected_indices_dict
+        # selected_indices = model.training_sample_sequences_indices[selected_indices_seed]
+        selected_indices = selected_indices_dict[selected_indices_seed]
+        
         # Grab subset of training sequences to add to eval batch
         training_sequences_subset = training_sequences.select(selected_indices)
         training_mutated_seq_pairs = training_sequences_subset['mutant_mutated_seq_pairs']
@@ -224,6 +231,7 @@ def process_batch(
     # Mask protein sequences
     rows_cannot_mask = None if mask_training_aa else\
         np.arange(number_of_mutated_seqs_to_score, batch_token_sequences.shape[0])
+    
     batch_masked_tokens, batch_token_labels, masked_indices = mask_protein_sequences(
         inputs = batch_token_sequences,
         alphabet = alphabet,
@@ -233,6 +241,12 @@ def process_batch(
         aa_can_mask = aa_can_mask,
         rows_cannot_mask=rows_cannot_mask
     )
+    masked_idx_values = []
+    for row in masked_indices:
+        row = row.nonzero(as_tuple=True)[0].tolist()
+        np.random.shuffle(row)
+        masked_idx_values.append(row)
+
     if args.sequence_embeddings_location is not None:
         if sequence_embeddings.shape[1] > masked_indices.shape[1]: # When dealing with sequences of different sizes, and sequences in batch happen to be all smaller than longest sequence in assay for which we computed embeddings
             extra_padding_in_embeddings = (sequence_embeddings.shape[1] - masked_indices.shape[1])
@@ -244,12 +258,14 @@ def process_batch(
     processed_batch = {
         'masked_tokens': batch_masked_tokens,
         'token_labels': batch_token_labels,
+        'gt_labels': batch_gt_labels,
         'masked_targets': batch_masked_targets,
         'target_labels': batch_target_labels,
         'mutant_mutated_seq_pairs': batch['mutant_mutated_seq_pairs'],
         'num_all_mutated_sequences_input': num_all_mutated_sequences_input,
         'num_of_mutated_seqs_to_score': number_of_mutated_seqs_to_score,
         'num_selected_training_sequences': num_selected_training_sequences,
-        'sequence_embeddings': sequence_embeddings
+        'sequence_embeddings': sequence_embeddings,
+        'shuffled_masked_indices': masked_idx_values,
     }
     return processed_batch

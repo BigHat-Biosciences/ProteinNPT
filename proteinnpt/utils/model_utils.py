@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from .data_utils import collate_fn_protein_npt
+from .data_utils import collate_fn_protein_npt, create_seed_val_data
 
 
 def get_parameter_names(model, forbidden_layer_types):
@@ -91,20 +91,20 @@ class Trainer():
         model,
         args,
         train_data, 
-        val_data=None,
-        val_seed_data=None,
-        MSA_sequences=None, 
+        val_datas={},
+        cg_oracle_fns=None,
         MSA_weights=None,
+        MSA_sequences=None,
         MSA_start_position=None,
         MSA_end_position=None,
         target_processing=None,
         distributed_training=False
-        ):
+    ):
         self.model = model
         self.args = args
         self.train_data = train_data
-        self.val_data = val_data
-        self.val_seed_data = val_seed_data
+        self.val_datas = val_datas
+        self.cg_oracle_fns = cg_oracle_fns
         self.MSA_sequences = MSA_sequences
         self.MSA_weights = MSA_weights
         self.MSA_start_position = MSA_start_position
@@ -122,6 +122,7 @@ class Trainer():
         self.model.set_device()
 
         if self.distributed_training:
+            print("Running in distributed mode!")
             # TODO: Implement weighted distributed sampler if we really want to run in distributed mode
             self.model = torch.nn.parallel.DistributedDataParallel(self.model)
             train_sampler = torch.utils.data.distributed.DistributedSampler(self.train_data)
@@ -138,6 +139,7 @@ class Trainer():
             worker_seed = torch.initial_seed() % 2**32
             np.random.seed(worker_seed)
             random.seed(worker_seed)
+        
         g = torch.Generator()
         g.manual_seed(0)
         train_loader = torch.utils.data.DataLoader(
@@ -165,8 +167,9 @@ class Trainer():
         total_train_time = 0
         log_train_total_loss = 0
         if self.model.model_type=="ProteinNPT":
-            log_train_reconstruction_loss = 0
-            log_train_num_masked_tokens = 0
+            log_train_reconstruction_loss, log_train_num_masked_tokens = 0, 0
+            log_train_num_cc_targets_dict, log_train_self_consistency_loss_dict = defaultdict(int), defaultdict(int)
+            log_train_num_signed_conds_dict, log_train_directionality_loss_dict = defaultdict(int), defaultdict(int)
             log_train_num_target_masked_tokens_dict = defaultdict(int)
         else:
             log_num_sequences_predicted = 0
@@ -179,7 +182,13 @@ class Trainer():
             optimizer.zero_grad(set_to_none=True)
             lr = scheduler(training_step)
             update_lr_optimizer(optimizer, lr)
-            reconstruction_loss_coeff = get_reconstruction_loss_coefficient(training_step, num_total_training_steps=self.args.num_total_training_steps) if (self.model.model_type=="ProteinNPT" and not self.model.PNPT_no_reconstruction_error) else 0
+            reconstruction_loss_coeff = get_reconstruction_loss_coefficient(
+                training_step,
+                num_total_training_steps=self.args.num_total_training_steps,
+                start_MLM_coefficient=0.5,
+                end_MLM_coefficient=0.05
+            ) if (self.model.model_type=="ProteinNPT" and not self.model.PNPT_no_reconstruction_error) else 0
+            
             for gradient_accum_step in range(self.args.gradient_accumulation):
                 try:
                     batch = next(train_iterator)
@@ -201,6 +210,9 @@ class Trainer():
                         training_sequences = None,
                         proba_target_mask = 0.15,
                         proba_aa_mask = 0.15,
+                        proba_unchanged=0.1,
+                        proba_random_mutation=0.1,
+                        proba_random_unmasked_mutation=(0.5-reconstruction_loss_coeff),
                         eval_mode = False,
                         device=self.model.device,
                         indel_mode=self.args.indel_mode
@@ -225,66 +237,64 @@ class Trainer():
                     del processed_batch['target_labels']['zero_shot_fitness_predictions']
                 else:
                     zero_shot_fitness_predictions = None
+                
+                output = self.model(
+                    tokens=processed_batch['masked_tokens'],
+                    targets=processed_batch['masked_targets'],
+                    zero_shot_fitness_predictions=zero_shot_fitness_predictions,
+                    sequence_embeddings=processed_batch['sequence_embeddings']
+                )
+                
+                sequence_logits = output['logits_protein_sequence'].squeeze()
+                argmax_token_preds = torch.argmax(sequence_logits, dim=-1)
+                
+                unmasked_tokens = processed_batch['masked_tokens'].clone()
+                masked_tokens_bool_mask = unmasked_tokens.eq(self.model.alphabet.mask_idx)
+                unmasked_tokens[masked_tokens_bool_mask] = argmax_token_preds[masked_tokens_bool_mask]
+                
+                unmasked_targets = {}
+                for target_name, target_tensor in processed_batch['masked_targets'].items():
+                    target_values = output['target_predictions'][target_name]
+                    flipped_target_tensor = target_tensor.clone()
+                    masked_targets_bool_mask = target_tensor[:,1].eq(1.0)
+                    flipped_target_tensor[masked_targets_bool_mask, 0] = target_values[masked_targets_bool_mask]
+                    flipped_target_tensor[~masked_targets_bool_mask, 0] = 0.0
+                    flipped_target_tensor[:, 1] = 1.0 - flipped_target_tensor[:, 1]
+                    unmasked_targets[target_name] = flipped_target_tensor
+
+                cc_output = self.model(
+                    tokens=unmasked_tokens,
+                    targets=unmasked_targets,
+                    zero_shot_fitness_predictions=zero_shot_fitness_predictions,
+                    sequence_embeddings=processed_batch['sequence_embeddings']
+                )
+
+                total_cc_loss, self_consistency_loss_dict, directionality_loss_dict, num_cc_targets_dict, num_signed_conds_dict =\
+                    self.model.self_consistency_loss(
+                        gt_labels = processed_batch['gt_labels'],
+                        masked_targets = processed_batch['masked_targets'],
+                        target_predictions = cc_output['target_predictions'],
+                        self_consistency_loss_weight = 1.0 - reconstruction_loss_coeff,
+                    )
+
+                total_npt_loss, reconstruction_loss, target_prediction_loss_dict = self.model.protein_npt_loss(
+                    token_predictions_logits=output['logits_protein_sequence'], 
+                    token_labels=processed_batch['token_labels'], 
+                    target_predictions=output['target_predictions'], 
+                    target_labels=processed_batch['target_labels'], 
+                    MLM_reconstruction_loss_weight=reconstruction_loss_coeff, 
+                    label_smoothing=self.args.label_smoothing
+                )
+
+                if total_npt_loss.item() > 10.0 and training_step >= 100:
+                    print("High training loss detected: {}".format(total_npt_loss.item()))
+
+                if total_cc_loss.item() > 10.0 and training_step >= 100:
+                    print("High training cc loss detected: {}".format(total_cc_loss.item()))
+
+                total_loss = total_npt_loss + total_cc_loss                
+                total_loss.backward()
             
-                if self.args.training_fp16:
-                    with torch.cuda.amp.autocast():
-                        if self.model.model_type=="ProteinNPT":
-                            output = self.model(
-                                tokens=processed_batch['masked_tokens'],
-                                targets=processed_batch['masked_targets'],
-                                zero_shot_fitness_predictions=zero_shot_fitness_predictions,
-                                sequence_embeddings=processed_batch['sequence_embeddings']
-                            )
-                            total_loss, reconstruction_loss, target_prediction_loss_dict = self.model.protein_npt_loss(
-                                token_predictions_logits=output['logits_protein_sequence'], 
-                                token_labels=processed_batch['token_labels'], 
-                                target_predictions=output['target_predictions'], 
-                                target_labels=processed_batch['target_labels'], 
-                                MLM_reconstruction_loss_weight=reconstruction_loss_coeff, 
-                                label_smoothing=self.args.label_smoothing
-                            )
-                        else:
-                            output = self.model(
-                                tokens=processed_batch['input_tokens'],
-                                zero_shot_fitness_predictions=zero_shot_fitness_predictions,
-                                sequence_embeddings=processed_batch['sequence_embeddings']
-                            )
-                            total_loss, target_prediction_loss_dict = self.model.prediction_loss(
-                                target_predictions=output["target_predictions"], 
-                                target_labels=processed_batch['target_labels'],
-                                label_smoothing=self.args.label_smoothing
-                            )
-                        scaler.scale(total_loss).backward()
-                else:
-                    if self.model.model_type=="ProteinNPT":
-                        output = self.model(
-                            tokens=processed_batch['masked_tokens'],
-                            targets=processed_batch['masked_targets'],
-                            zero_shot_fitness_predictions=zero_shot_fitness_predictions,
-                            sequence_embeddings=processed_batch['sequence_embeddings']
-                        )
-                        total_loss, reconstruction_loss, target_prediction_loss_dict = self.model.protein_npt_loss(
-                            token_predictions_logits=output['logits_protein_sequence'], 
-                            token_labels=processed_batch['token_labels'], 
-                            target_predictions=output['target_predictions'], 
-                            target_labels=processed_batch['target_labels'], 
-                            MLM_reconstruction_loss_weight=reconstruction_loss_coeff, 
-                            label_smoothing=self.args.label_smoothing
-                        )
-                        if total_loss.item() > 10.0 and training_step >= 100:
-                            print("High training loss detected: {}".format(total_loss.item()))
-                    else:
-                        output = self.model(
-                            tokens=processed_batch['input_tokens'],
-                            zero_shot_fitness_predictions=zero_shot_fitness_predictions,
-                            sequence_embeddings=processed_batch['sequence_embeddings']
-                        )
-                        total_loss, target_prediction_loss_dict = self.model.prediction_loss(
-                            target_predictions=output["target_predictions"], 
-                            target_labels=processed_batch['target_labels'],
-                            label_smoothing=self.args.label_smoothing
-                        )
-                    total_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_norm_clip)
             # Taking optimizer update out of the inner loop to support gradient accumulation
             if self.args.training_fp16:
@@ -299,24 +309,33 @@ class Trainer():
                 num_masked_tokens_in_batch = (~processed_batch['token_labels'].eq(-100)).sum().item()
                 log_train_num_masked_tokens += num_masked_tokens_in_batch
                 log_train_reconstruction_loss += reconstruction_loss * num_masked_tokens_in_batch
+                
                 for target_name in self.model.target_names:
                     if self.args.target_config[target_name]["type"]=="continuous":
                         num_masked_tokens_target_in_batch = processed_batch['masked_targets'][target_name][:,-1].eq(1.0).sum().item() # Masked targets are encoded by 1.0. Mask column is the very last one
                     else:
                         num_masked_tokens_target_in_batch = processed_batch['masked_targets'][target_name].eq(self.args.target_config[target_name]["dim"]).sum().item() # Index of mask is exactly self.args.target_config[target_name]["dim"] (largest value possible)
+                    
                     log_train_num_target_masked_tokens_dict[target_name] += num_masked_tokens_target_in_batch
                     log_train_target_prediction_loss_dict[target_name] += target_prediction_loss_dict[target_name] * num_masked_tokens_target_in_batch
+
+                    log_train_num_cc_targets_dict[target_name] += num_cc_targets_dict[target_name]
+                    log_train_num_signed_conds_dict[target_name] += num_signed_conds_dict[target_name]
+                    log_train_self_consistency_loss_dict[target_name] += self_consistency_loss_dict[target_name] * num_cc_targets_dict[target_name]
+                    log_train_directionality_loss_dict[target_name] += directionality_loss_dict[target_name] * num_signed_conds_dict[target_name]
             else:
                 log_num_sequences_predicted += len(batch['mutant_mutated_seq_pairs'])
                 for target_name in self.model.target_names:
                     log_train_target_prediction_loss_dict[target_name] += target_prediction_loss_dict[target_name] * len(batch['mutant_mutated_seq_pairs'])
+            
             if training_step % self.args.num_logging_training_steps == 0 and self.args.use_wandb:
                 time_end_step = time.time()
                 delta_time_since_last_log = time_end_step - prior_log_time
                 total_train_time += delta_time_since_last_log
                 prior_log_time = time_end_step
                 train_logs = {
-                    "training_step": training_step, 
+                    "training_step": training_step,
+                    "reconstruction_loss_coeff": reconstruction_loss_coeff,
                     "step_time": delta_time_since_last_log / (self.args.num_logging_training_steps)
                 }
                 if self.model.model_type=="ProteinNPT": 
@@ -324,6 +343,8 @@ class Trainer():
                     train_logs["train_reconstruction_loss_per_masked_token"] = log_train_reconstruction_loss.item() / log_train_num_masked_tokens
                     for target_name in self.model.target_names:
                         train_logs["train_prediction_"+str(target_name)+"_loss_per_masked_token"] = log_train_target_prediction_loss_dict[target_name].item() / log_train_num_target_masked_tokens_dict[target_name]
+                        train_logs["train_self_consistency_"+str(target_name)+"_loss_per_cc_target"] = log_train_self_consistency_loss_dict[target_name].item() / log_train_num_cc_targets_dict[target_name]
+                        train_logs["train_directionality_"+str(target_name)+"_loss_per_signed_cond"] = log_train_directionality_loss_dict[target_name].item() / log_train_num_signed_conds_dict[target_name]
                 else:
                     train_logs["train_total_loss_per_seq"]: log_train_total_loss / log_num_sequences_predicted
                     for target_name in self.model.target_names:
@@ -333,9 +354,10 @@ class Trainer():
                 log_train_total_loss = 0
                 log_train_target_prediction_loss_dict = defaultdict(int)
                 if self.model.model_type=="ProteinNPT":
-                    log_train_reconstruction_loss = 0
-                    log_train_num_masked_tokens = 0
+                    log_train_reconstruction_loss, log_train_num_masked_tokens = 0, 0
                     log_train_num_target_masked_tokens_dict = defaultdict(int)
+                    log_train_num_cc_targets_dict, log_train_self_consistency_loss_dict = defaultdict(int), defaultdict(int)
+                    log_train_num_signed_conds_dict, log_train_directionality_loss_dict = defaultdict(int), defaultdict(int)
                 else:
                     log_num_sequences_predicted = 0 
                 
@@ -352,69 +374,100 @@ class Trainer():
                 )
             
             if training_step % self.args.num_eval_steps == 0 and self.args.use_validation_set:
-                if self.model.model_type=="ProteinNPT":
-                    seed_eval_results = self.eval_cg_from_seed(
-                        test_data=self.val_seed_data,
-                        train_data=self.train_data
-                    )
-                    eval_results = self.eval(
-                        test_data=self.val_data,
-                        train_data=self.train_data,
-                        reconstruction_loss_weight=0.0,
-                        output_all_predictions=True
-                    )
-                else:
-                    seed_eval_results = self.eval_cg_from_seed(
-                        test_data=self.val_seed_data,
-                        train_data=self.train_data
-                    )
-                    eval_results = self.eval(
-                        test_data=self.val_data, 
-                        output_all_predictions=True
-                    )
 
-                # Parse logs for eval property prediction using validation set
-                eval_logs = {"Training step": training_step}
-                eval_logs['Eval total loss per seq.'] = eval_results['eval_total_loss']
-                average_spearman_across_targets = 0 # If early stopping based on validation spearman and multiple targets, we check that avg spearman is not decreasing for a certain # of times in a row
-                for target_name in self.model.target_names:
-                    eval_logs['Eval loss '+str(target_name)+' per seq.'] = eval_results['eval_target_prediction_loss_dict'][target_name]
-                    if self.args.target_config[target_name]["dim"]==1:
-                        eval_logs['Eval spearman '+target_name] = spearmanr(eval_results['output_scores']['predictions_'+target_name], eval_results['output_scores']['labels_'+target_name])[0]
+                ############# Perform Property Prediction Evaluation on Eval Sets #############
+
+                for val_data_name, val_dataset in self.val_datas.items():
+                    print(f"Validation set: {val_data_name}")
+                    
+                    if self.model.model_type=="ProteinNPT":
+                        eval_results = self.eval(
+                            test_data=val_dataset,
+                            train_data=self.train_data,
+                            reconstruction_loss_weight=0.0,
+                            output_all_predictions=True
+                        )
                     else:
-                        # In the categorical setting, we predict the spearman between the logits of the category with highest index, and target value indices. This is meaningul in the binary setting. Use with care if 3 categories or more.
-                        eval_logs['Eval spearman '+target_name] = spearmanr(eval_results['output_scores']['predictions_'+target_name][:,-1], eval_results['output_scores']['labels_'+target_name])[0]
-                    average_spearman_across_targets += eval_logs['Eval spearman '+target_name]
-                average_spearman_across_targets /= len(self.model.target_names)
-                print(" | ".join([key + ": "+str(round(eval_logs[key],5)) for key in eval_logs.keys()]))
+                        eval_results = self.eval(
+                            test_data=val_dataset, 
+                            output_all_predictions=True
+                        )
 
-                # Parse logs for eval conditional generation from seed sequence                
-                if self.args.use_wandb:
-                    wandb.log(eval_logs)
-                    wandb.log(seed_eval_results)
-                
-                # Early stopping and best model saving based on eval spearman
-                all_spearmans_eval_during_training.append(average_spearman_across_targets)
-                if average_spearman_across_targets > max_average_spearman_across_targets:
-                    max_average_spearman_across_targets = average_spearman_across_targets
-                    if not os.path.exists(self.args.model_location): os.mkdir(self.args.model_location)
-                    if not os.path.exists(self.args.model_location + os.sep + 'checkpoint-best-spearman'):
-                        os.mkdir(self.args.model_location + os.sep + 'checkpoint-best-spearman')
+                    # Parse logs for eval property prediction using validation set
+                    eval_logs = {}
+                    eval_logs['Eval total loss per seq.'] = eval_results['eval_total_loss']
+                    average_spearman_across_targets = 0
 
-                    torch.save({
-                            'training_step': training_step,
-                            'args': self.args,
-                            'state_dict': self.model.state_dict(),
-                            'optimizer' : optimizer.state_dict()
-                        }, 
-                        self.args.model_location + os.sep + 'checkpoint-best-spearman' + os.sep + 'checkpoint.t7'
+                    for target_name in self.model.target_names:
+                        eval_logs['Eval loss '+str(target_name)+' per seq.'] = eval_results['eval_target_prediction_loss_dict'][target_name]
+                        
+                        preds = np.array(eval_results['output_scores']['predictions_'+target_name])
+                        labels = np.array(eval_results['output_scores']['labels_'+target_name])
+                        
+                        if self.args.target_config[target_name]["dim"] == 1:
+                            eval_logs[f'Eval spearman {target_name}'] = spearmanr(preds, labels)[0]
+                            eval_logs[f'Eval rmse {target_name}'] = np.sqrt(np.mean((preds - labels)**2))
+                        else:
+                            eval_logs[f'Eval spearman {target_name}'] = spearmanr(preds[:,-1], labels)[0]
+                        
+                        if eval_logs['Eval spearman ' + target_name] is not np.nan:
+                            average_spearman_across_targets += eval_logs['Eval spearman ' + target_name]
+                    
+                    average_spearman_across_targets /= len(self.model.target_names)
+                    print(" | ".join([key + ": "+str(round(eval_logs[key],5)) for key in eval_logs.keys()]))
+
+                    if self.args.use_wandb:
+                        wandb.log({ f"eval_pp_{val_data_name}": eval_logs })
+
+                    if self.args.eval_save_on_name == val_data_name:
+                        # We save the model checkpoint based on the best spearman across all targets of this validation set
+                        all_spearmans_eval_during_training.append(average_spearman_across_targets)
+                        if average_spearman_across_targets > max_average_spearman_across_targets:
+                            max_average_spearman_across_targets = average_spearman_across_targets
+                            os.makedirs(self.args.model_location + os.sep + 'checkpoint-best-spearman', exist_ok=True)
+                            torch.save({
+                                    'training_step': training_step,
+                                    'args': self.args,
+                                    'state_dict': self.model.state_dict(),
+                                    'optimizer' : optimizer.state_dict()
+                                }, 
+                                self.args.model_location + os.sep + 'checkpoint-best-spearman' + os.sep + 'checkpoint.t7'
+                            )
+
+                        if (training_step >= 1000) and (self.args.early_stopping_patience is not None) and (np.array(all_spearmans_eval_during_training)[-self.args.early_stopping_patience:].max() < max_average_spearman_across_targets):
+                            print("Early stopping. Training step: {}. Total eval loss: {}. Avg spearman: {}".format(training_step, eval_results['eval_total_loss'], average_spearman_across_targets))
+                            break
+
+                ############# Perform Conditional Seed Generation Evaluation on Eval Sets #############
+                if self.args.eval_cg_from_seed:
+
+                    samples, sampling_logs = self.sample(
+                        cond_methods=self.args.cond_methods,
+                        train_data = self.train_data,
+                        proba_aa_mask = self.args.proba_aa_mask,
+                        n = self.args.n,
+                        return_logs=True
                     )
 
-                if (training_step >= 1000) and (self.args.early_stopping_patience is not None) and (np.array(all_spearmans_eval_during_training)[-self.args.early_stopping_patience:].max() < max_average_spearman_across_targets):
-                    print("Early stopping. Training step: {}. Total eval loss: {}. Avg spearman: {}".format(training_step, eval_results['eval_total_loss'], average_spearman_across_targets))
-                    break
+                    for oracle_fn_name, oracle_fn in self.cg_oracle_fns.items():
+                        try:
+                            oracle_scores = oracle_fn(samples)
+                            mean, std = np.mean(oracle_scores), np.std(oracle_scores)
+                            sampling_logs[f'oracle_{oracle_fn_name}_mean'] = mean
+                            sampling_logs[f'oracle_{oracle_fn_name}_std'] = std
+                            print(f"Oracle function {oracle_fn_name} mean: {mean}, std: {std}")
+                        except Exception as e:
+                            print(f"Oracle function {oracle_fn_name} failed with error: {e}")
+                            pass
+                    
+                    if self.args.use_wandb:
+                        target_names = self.target_processing.keys()
+                        assert len(target_names) == len(self.args.cond_methods)
+                        key = ",".join([f"{t}={c}" for t,c in zip(target_names, self.args.cond_methods)])
+                        wandb.log({ f"{key}": sampling_logs })
                 
-                self.model.train() # Move back the model to train mode after eval loop
+                #################################################################################
+                self.model.train()
         
         trainer_final_status = {
             'total_training_steps': training_step,
@@ -605,200 +658,230 @@ class Trainer():
         else:
             eval_results['eval_num_predicted_targets'] = num_predicted_targets
         return eval_results
-
-
-    def eval_cg_from_seed(
+    
+    @torch.no_grad()
+    def predict(
         self,
-        test_data,
+        data,
+        train_data = None
+    ):
+        import proteinnpt
+        import editdistance
+        self.model.eval()
+        self.model.set_device()
+            
+        eval_loader = torch.utils.data.DataLoader(
+            dataset=data,
+            batch_size=self.args.eval_num_sequences_to_score_per_batch_per_gpu, 
+            shuffle=True,
+            num_workers=self.args.num_data_loaders_workers,
+            pin_memory=True,
+            collate_fn=collate_fn_protein_npt
+        )
+        eval_iterator = iter(eval_loader)
+
+        outputs = defaultdict(list)
+        train_data = train_data if train_data is not None else self.train_data
+
+        for batch in tqdm.tqdm(eval_iterator):
+            
+            # Check if we should add best-aligned sequences to context
+            if self.args.eval_num_closest_aligned_sequences > 0:
+                context_indices = []
+                for sample in batch['mutant_mutated_seq_pairs']:
+                    sequence_to_score = sample[1]
+                    edit_distances = []
+                    for seq in tqdm.tqdm(train_data['mutant_mutated_seq_pairs']):
+                        edit_distances.append(editdistance.eval(sequence_to_score, seq[1]))
+                    best_aligned_indices = np.argsort(edit_distances)[:self.args.eval_num_closest_aligned_sequences]
+                    context_indices.extend(best_aligned_indices)
+                context_data = train_data.select(context_indices)
+            else:
+                context_data = train_data
+
+            # Remove batch sequences from context data if using assay data as context
+            if self.args.use_assay_data_as_context:
+                batch_indices = batch['index']
+                context_data_indices = list(range(len(context_data)))
+                context_data_indices = [i for i in context_data_indices if i not in batch_indices]
+                context_data = context_data.select(context_data_indices)
+
+            processed_batch = proteinnpt.proteinnpt.data_processing.process_batch(
+                batch = batch,
+                model = self.model,
+                alphabet = self.model.alphabet, 
+                args = self.args, 
+                MSA_sequences = self.MSA_sequences, 
+                MSA_weights = self.MSA_weights,
+                MSA_start_position = self.MSA_start_position, 
+                MSA_end_position = self.MSA_end_position,
+                target_processing = self.target_processing,
+                training_sequences = context_data,
+                num_training_sequences=len(context_data['mutant_mutated_seq_pairs']),
+                proba_target_mask = 1.0,
+                proba_aa_mask = 0.0,
+                eval_mode = True,
+                device=self.model.device,
+                selected_indices_seed=0,
+                indel_mode=self.args.indel_mode
+            )
+
+            output = self.model(
+                tokens=processed_batch['masked_tokens'],
+                targets=processed_batch['masked_targets'],
+                zero_shot_fitness_predictions=None,
+                sequence_embeddings=processed_batch['sequence_embeddings'],
+                need_head_weights=False
+            )
+
+            num_of_mutated_seqs_to_score = processed_batch['num_of_mutated_seqs_to_score']
+            for target_name in self.model.target_names:
+                    outputs['predictions_' + target_name] += list(output["target_predictions"][target_name][:num_of_mutated_seqs_to_score].cpu().numpy())
+                    outputs['labels_' + target_name] += list(processed_batch['target_labels'][target_name][:num_of_mutated_seqs_to_score].cpu().numpy())
+        
+        return outputs
+
+    @torch.no_grad()
+    def sample(
+        self,
+        cond_methods,
+        method = "denoising",
+        eval_mode = True,
         train_data = None,
         proba_aa_mask = 0.05217391304347826,
-        selected_indices_seed=0,
+        temperature = 1.0,
+        n=1000,
+        return_logs = False
     ):
-        """
-        Generates variants from the seed sequence conditioned on custom properties, then 
-        computes a self-consistency score based on the predicted properties of the generated variants.
-        Ideally, we want the predicted properties of the generated variants to be close to the
-        target properties.
-        TODO: Predicted properties are not yet implemented
-        TODO: Implement a more general version of this function that can handle multiple properties
-        TODO: Implement other sampling methods
-        """
         import proteinnpt
-        self.model.eval()
+        from datasets import Dataset
+
+        if eval_mode: self.model.eval()
+        else: self.model.train()
+
         self.model.cuda()
         self.model.set_device()
-        test_data_size = len(test_data['mutant_mutated_seq_pairs'])
+
+        test_data = create_seed_val_data(self.args, self.target_processing, cond_methods, n=n)
         train_data_size = len(train_data['mutant_mutated_seq_pairs'])
 
-        lead_seq = self.args.target_seq
-        cdr_mask = self.args.target_seq_cdr_mask
+        lead_seq, cdr_mask = self.args.target_seq, self.args.target_seq_cdr_mask
+        clean_lead_seq = "".join([aa for aa in lead_seq if aa != '-'])
         assert lead_seq is not None, "Lead sequence is required for conditional generation from seed"
         assert cdr_mask is not None, "CDR mask is required for conditional generation from seed"
 
         amino_acids = "ACDEFGHIKLMNPQRSTVWY"
         aa_token_mask = sorted([self.model.alphabet.tok_to_idx[aa] for aa in amino_acids])
-        aa_token_map = sorted(amino_acids, key=lambda x: self.model.alphabet.tok_to_idx[x])
         sample_mask = self.args.target_seq_mutable_mask if self.args.target_seq_mutable_mask is not None\
             else [True]*len(lead_seq)
-        full_sample_mask = np.concatenate([[False], sample_mask, [False]], axis=0).squeeze()    # Pad the mask for <bos> and <eos> tokens
-        temperature = 1.0
-        new_sequences = []
-        regions = ['fr1', 'cdr1', 'fr2', 'cdr2', 'fr3', 'cdr3', 'fr4']
-        prop = 'tm' # Only support single property for now
-
-        with torch.no_grad():
-            eval_loader = torch.utils.data.DataLoader(
-                                dataset=test_data, 
-                                batch_size=self.args.eval_num_sequences_to_score_per_batch_per_gpu, 
-                                shuffle=False,
-                                num_workers=self.args.num_data_loaders_workers,
-                                pin_memory=True,
-                                collate_fn=collate_fn_protein_npt
-                            )
-            eval_iterator = iter(eval_loader)
-            
-            num_eval_batches = 0
-            eval_total_loss = 0
-            if self.model.model_type=="ProteinNPT": 
-                eval_reconstruction_loss = 0
-                eval_num_masked_tokens = 0
-                eval_num_masked_targets = defaultdict(int)
-            else:
-                num_predicted_targets = 0
-            eval_target_prediction_loss_dict = defaultdict(int)
-            output_scores = defaultdict(list)
-
-            for batch in tqdm.tqdm(eval_iterator):
-                output_scores['mutated_sequence'] += list(zip(*batch['mutant_mutated_seq_pairs']))[1]
-                output_scores['mutant'] += list(zip(*batch['mutant_mutated_seq_pairs']))[0]
-                
-                if self.model.model_type=="ProteinNPT":
-                    processed_batch = proteinnpt.proteinnpt.data_processing.process_batch(
-                        batch = batch,
-                        model = self.model,
-                        alphabet = self.model.alphabet, 
-                        args = self.args, 
-                        MSA_sequences = self.MSA_sequences, 
-                        MSA_weights = self.MSA_weights,
-                        MSA_start_position = self.MSA_start_position, 
-                        MSA_end_position = self.MSA_end_position,
-                        target_processing = self.target_processing,
-                        training_sequences = train_data,
-                        num_training_sequences=train_data_size,
-                        proba_target_mask = 0.0,                    # Never mask the target properties during CG
-                        proba_aa_mask = proba_aa_mask,              # Mask amino acids with this probability
-                        aa_can_mask=full_sample_mask,               # Only mask amino acids at these positions
-                        eval_mode = True,
-                        mask_training_aa = False,                   # Do not mask training amino acids during eval
-                        device=self.model.device,
-                        selected_indices_seed=selected_indices_seed,
-                        indel_mode=self.args.indel_mode
-                    )
-                else:
-                    processed_batch = proteinnpt.baselines.data_processing.process_batch(
-                        batch = batch,
-                        model = self.model,
-                        alphabet = self.model.alphabet, 
-                        args = self.args, 
-                        MSA_sequences = self.MSA_sequences, 
-                        MSA_weights = self.MSA_weights,
-                        MSA_start_position = self.MSA_start_position, 
-                        MSA_end_position = self.MSA_end_position,
-                        device=self.model.device,
-                        eval_mode=True,
-                        indel_mode=self.args.indel_mode
-                    )
-
-                if self.args.augmentation=="zero_shot_fitness_predictions_covariate":
-                    zero_shot_fitness_predictions = processed_batch['target_labels']['zero_shot_fitness_predictions'].view(-1,1)
-                    del processed_batch['target_labels']['zero_shot_fitness_predictions']
-                else:
-                    zero_shot_fitness_predictions = None
         
-                if self.model.model_type=="ProteinNPT":
-                    output = self.model(
-                        tokens=processed_batch['masked_tokens'],
-                        targets=processed_batch['masked_targets'],
-                        zero_shot_fitness_predictions=zero_shot_fitness_predictions,
-                        sequence_embeddings=processed_batch['sequence_embeddings'],
-                        need_head_weights=False
-                    )
-                    batch_loss, batch_reconstruction_loss, batch_target_prediction_loss_dict = self.model.protein_npt_loss(
-                        token_predictions_logits=output['logits_protein_sequence'], 
-                        token_labels=processed_batch['token_labels'], 
-                        target_predictions=output['target_predictions'], 
-                        target_labels=processed_batch['target_labels'], 
-                        MLM_reconstruction_loss_weight=1.0,
-                        label_smoothing=self.args.label_smoothing
-                    )
-                    if batch_loss.item() > 10.0:
-                        print("High eval loss detected: {}".format(batch_loss.item()))
-                else:
-                    output = self.model(
-                        tokens=processed_batch['input_tokens'],
-                        zero_shot_fitness_predictions=zero_shot_fitness_predictions,
-                        sequence_embeddings=processed_batch['sequence_embeddings']
-                    )
-                    batch_loss, batch_target_prediction_loss_dict = self.model.prediction_loss(
-                        target_predictions=output["target_predictions"], 
-                        target_labels=processed_batch['target_labels'],
-                        label_smoothing=self.args.label_smoothing
-                    )
-                
-                num_eval_batches += 1
-                eval_total_loss += batch_loss.item()
+        # Pad the mask for <bos> and <eos> tokens
+        full_sample_mask = np.concatenate([[False], sample_mask, [False]], axis=0).squeeze()
+        all_toks = self.model.alphabet.all_toks
+        new_sequences = []
 
-                # Sample generated sequences using the logits of the output
+        eval_loader = torch.utils.data.DataLoader(
+            dataset=test_data, 
+            batch_size=self.args.eval_num_sequences_to_score_per_batch_per_gpu, 
+            shuffle=False,
+            num_workers=self.args.num_data_loaders_workers,
+            pin_memory=True,
+            collate_fn=collate_fn_protein_npt
+        )
+        eval_iterator = iter(eval_loader)
+
+        for batch in tqdm.tqdm(eval_iterator):
+            processed_batch = proteinnpt.proteinnpt.data_processing.process_batch(
+                batch = batch,
+                model = self.model,
+                alphabet = self.model.alphabet, 
+                args = self.args, 
+                target_processing = self.target_processing,
+                training_sequences = train_data,
+                num_training_sequences=train_data_size,
+                proba_target_mask = 0.0,                    # Never mask the target properties during CG
+                proba_aa_mask = proba_aa_mask,              # Mask amino acids with this probability
+                aa_can_mask=full_sample_mask,               # Only mask amino acids at these positions
+                eval_mode = True,
+                mask_training_aa = False,                   # Do not mask training amino acids during eval
+                device=self.model.device,
+                selected_indices_seed=0,
+                indel_mode=self.args.indel_mode
+            )
+
+            # Assume denoising sampling for now, so we need to unmask the amino acids one at a time and recompute the logits after each unmasking
+            max_masks_per_sequence = max(list(map(len, processed_batch['shuffled_masked_indices'])))
+            print(f"Max masks per sequence: {max_masks_per_sequence}")
+
+            for mutation_idx in range(max_masks_per_sequence):
+                output = self.model(
+                    tokens=processed_batch['masked_tokens'],
+                    targets=processed_batch['masked_targets'],
+                    zero_shot_fitness_predictions=None,
+                    sequence_embeddings=None,
+                    need_head_weights=False
+                )
                 logits = output['logits_protein_sequence'].detach().squeeze().cpu().numpy()
-                sample_mask = processed_batch['masked_tokens'].eq(self.model.alphabet.mask_idx).squeeze().cpu().numpy()
 
                 for i in range(self.args.eval_num_sequences_to_score_per_batch_per_gpu):
-                    ith_logits = logits[i]
-                    sample_mask_idx = np.where(sample_mask[i])[0]
-                    if len(sample_mask_idx) == 0:
-                        continue
-                    ith_logits = torch.tensor(ith_logits[sample_mask_idx][:,aa_token_mask])
-
-                    # Sample from the logits to obtain new amino acid token indices
-                    aa_categorical = torch.distributions.Categorical(logits=ith_logits/temperature)
-                    new_aa_token_indices = aa_categorical.sample()
-                    new_sequence = list(lead_seq)
+                    shuffled_masked_indices = processed_batch['shuffled_masked_indices'][i]
                     
-                    for ind, aa_token in zip(sample_mask_idx, new_aa_token_indices):
-                        assert sample_mask[i][ind], "Sample mask is not set correctly"
-                        assert full_sample_mask[ind], "Full sample mask is not set correctly"
-                        new_sequence[ind-1] = aa_token_map[aa_token.item()]   # -1 to account for <bos> token
+                    if len(shuffled_masked_indices) == 0 and mutation_idx == 0:
+                        new_sequences.append(clean_lead_seq)
 
-                    new_sequence = [aa for aa in new_sequence if aa != '-']
-                    new_sequences.append("".join(new_sequence))
-                
-                if self.model.model_type=="ProteinNPT":
-                    num_masked_tokens_in_batch = (processed_batch['masked_tokens'].eq(self.model.alphabet.mask_idx)).sum().item()
-                    eval_num_masked_tokens += num_masked_tokens_in_batch
-                    eval_reconstruction_loss += batch_reconstruction_loss.item() * num_masked_tokens_in_batch
-                else:
-                    num_predicted_targets += len(batch['mutant_mutated_seq_pairs'])
+                    if mutation_idx >= len(shuffled_masked_indices):
+                        continue
+                    
+                    current_masked_idx = shuffled_masked_indices[mutation_idx]
+                    current_seq_logits = logits[i]
+                    current_masked_logits = torch.tensor(current_seq_logits[current_masked_idx][aa_token_mask])
+                    
+                    # Sample from the logits to obtain the new amino acid token at the current masked position
+                    aa_categorical = torch.distributions.Categorical(logits=current_masked_logits/temperature)
+                    new_aa_token_index = aa_categorical.sample()
 
-        unique_new_sequences = list(set(new_sequences))
-        assert all([len(s) == len(cdr_mask) for s in unique_new_sequences]),\
-            "All generated sequences must have the same length as the seed sequence"
+                    # Update the masked token with the new amino acid token
+                    processed_batch['masked_tokens'][i][current_masked_idx] = aa_token_mask[new_aa_token_index.item()]
+                    
+                    if mutation_idx == len(shuffled_masked_indices) - 1:
+                        # We have reached the end of the sequence, so let's collect it
+                        new_sequence = processed_batch['masked_tokens'][i].cpu().numpy()
+                        for aa_token in new_sequence: assert aa_token != self.model.alphabet.mask_idx, "Masked token found in supposedly finished sequence"
+                        new_sequence = [all_toks[j] for j in processed_batch['masked_tokens'][i].cpu().numpy()]
+                        new_sequence = [aa for aa in new_sequence if aa not in self.model.alphabet.all_special_tokens]
+                        new_sequences.append("".join(new_sequence))
 
-        new_samples_regions = [apply_cdr_mask(s, cdr_mask) for s in unique_new_sequences]
-        new_samples_regions = {reg: [s[reg] for s in new_samples_regions] for reg in regions}
-        num_unique_regions = {
-            f"seed_eval_num_{reg.capitalize()}_{prop[1:-1]}": len(set(new_samples_regions[reg]))
-            for reg in new_samples_regions.keys()
-        }
+            print(f"Number of sequences generated: {len(new_sequences)}")
+
+        mutant_values = [v[0] for v in test_data['mutant_mutated_seq_pairs']] 
+        assert len(new_sequences) == len(mutant_values), "Number of generated sequences does not match number of mutant values"
+        new_mutant_mutated_seq_pairs = list(zip(mutant_values, new_sequences))
+        test_data = test_data.remove_columns(['mutant_mutated_seq_pairs'])
+        test_data = test_data.add_column('mutant_mutated_seq_pairs', new_mutant_mutated_seq_pairs)
         
-        eval_results = {
-            'seed_eval_total_loss': eval_total_loss / num_eval_batches,
-            'seed_eval_reconstruction_loss': eval_reconstruction_loss / eval_num_masked_tokens,
-            'seed_eval_avg_num_masked_tokens': eval_num_masked_tokens / num_eval_batches,
-            'seed_eval_num_unique_seqs': len(unique_new_sequences),
-            **num_unique_regions
-        }
-
-        print(eval_results, sep='\n')
+        preds = self.predict(test_data)
         
-        return eval_results
-    
+        logs = {}
+        for target_name in self.model.target_names:
+            mean_preds = np.array(preds['predictions_' + target_name]).mean()
+            mean_labels = np.array(preds['labels_' + target_name]).mean()
+            rmse = np.sqrt((mean_preds - mean_labels)**2)
+            sp = spearmanr(preds['predictions_' + target_name], preds['labels_' + target_name])[0]
+            logs[f"RMSE_{target_name}"] = rmse
+            logs[f"Spearman_{target_name}"] = sp
+            print(f"RMSE for {target_name}: {rmse}")
+            print(f"Spearman for {target_name}: {sp}")
+
+        unaligned_sequences = []
+        for seq in new_sequences:
+            unaligned_seq = "".join([aa for aa in seq if aa != '-'])
+            unaligned_sequences.append(unaligned_seq)
+
+        unique_sequences = list(set(unaligned_sequences))
+        logs["Num unique sequences"] = len(unique_sequences)
+        print(f"Number of unique sequences sampled: {len(unique_sequences)}")
+
+        if return_logs:
+            return unique_sequences, logs
+
+        return unique_sequences

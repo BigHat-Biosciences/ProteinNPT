@@ -1,17 +1,15 @@
-import os,gc
+import os
 import json
 import argparse
 import random
 import numpy as np
 import pandas as pd
-import wandb
 import torch
-from pprint import pprint
 
 from proteinnpt.proteinnpt.model import ProteinNPTModel
 from proteinnpt.utils.esm.data import Alphabet
+from proteinnpt.utils.data_utils import get_train_val_test_data
 from proteinnpt.utils.model_utils import Trainer
-from proteinnpt.utils.data_utils import get_dataset_from_csv_file, pnpt_spearmanr
 
 
 def str2bool(v):
@@ -28,35 +26,18 @@ def str2bool(v):
     
 
 def setup_config_and_paths(args):
-    # Setup output paths inside the sagemaker container
-    args.output_scores_location = args.output_dir + os.sep + 'model_predictions'
-    args.model_location = args.output_dir + os.sep + 'checkpoints'
-    os.makedirs(args.output_scores_location, exist_ok=True)
-    os.makedirs(args.model_location, exist_ok=True)
+    # Create output directories if they don't exist
+    if not os.path.exists(args.output_dir):
+        raise ValueError(f"Output directory {args.output_dir} does not exist")
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir, exist_ok=True)
 
-    # Setup input paths inside the sagemaker container
+    args.model_location = args.output_dir + os.sep + 'checkpoint'
     args.model_config_location = os.path.join(args.model_config_dir, args.model_config_name)
     args.target_config_location = os.path.join(args.target_config_dir, args.target_config_name)
-    if args.model_checkpoint_dir is not None:
-        args.model_checkpoint_location = os.path.join(args.model_checkpoint_dir, 'checkpoint.t7')
-    
-    # Model and Target Configs must exist to continue
-    assert os.path.exists(args.model_config_location), f"Model config file not found at {args.model_config_location}"
-    assert os.path.exists(args.target_config_location), f"Target config file not found at {args.target_config_location}"
 
-    # Setup paths to training data
-    args.assay_data_folder = args.input_dir
-    args.target_processing_location = None
-    if args.target_processing_filename is not None:
-        args.target_processing_location = os.path.join(args.input_dir, args.target_processing_filename)
-    args.train_data_location = os.path.join(args.input_dir, args.train_data_filename)
-    args.eval_data_locations = [os.path.join(args.input_dir, f) for f in args.eval_data_filenames]
-    args.test_data_location = os.path.join(args.input_dir, args.test_data_filename) if args.test_data_filename is not None else None
-
-    assert os.path.exists(args.train_data_location), f"Training data file not found at {args.train_data_location}"
-    assert all([os.path.exists(f) for f in args.eval_data_locations]), f"Eval data file not found at {args.eval_data_locations}"
-    if args.test_data_location is not None:
-        assert os.path.exists(args.test_data_location), f"Test data file not found at {args.test_data_location}"
+    args.assay_data_location = os.path.join(args.input_dir, args.assay_data_location)                       # .csv file
+    args.assay_data_folder = [ os.sep.join(args.assay_data_location.split(os.sep)[:-1]) ]                   # For now, we only support one assay target
     
     ############################# SETUP MODEL CONFIG #############################
     if args.model_config_location is not None:
@@ -75,8 +56,8 @@ def setup_config_and_paths(args):
     # Check that all targets have a location with associated labelled data
     for _, target in enumerate(args.target_config):
         assert args.assay_data_folder is not None
-        args.target_config[target]["location"] = args.assay_data_folder
-        print("Location used for target {} is: {}".format(target, args.assay_data_folder))
+        args.target_config[target]["location"] = args.assay_data_folder[0]
+        print("Location used for target {} is: {}".format(target,args.assay_data_folder[0]))
     ############################# SETUP TARGET CONFIG #############################
 
     return args
@@ -96,10 +77,14 @@ def main(args):
     num_targets_input = len(target_names_input)
     
     print("We want to predict {} target(s): {}".format(num_targets, ' and '.join(target_names)))
-    assert num_targets == num_targets_input, "Number of targets in target_config and target_config_input do not match"
 
-    assay_id = args.train_data_location.split(".csv")[0].split(os.sep)[-1]
-    assay_file_name = args.train_data_filename
+    if num_targets_input > num_targets:
+        print("We leverage {} target(s) and auxiliary labels: {}".format(num_targets_input, ' and '.join(target_names_input)))
+
+    assay_id = args.assay_data_location.split(".csv")[0].split(os.sep)[-1]
+    assay_file_name = args.assay_data_location.split(os.sep)[-1]
+    args.seq_len = len(args.target_seq)
+    args.MSA_seq_len = args.MSA_end - args.MSA_start + 1
     print("Training model for assay: {}, where the test_fold index is: {}".format(assay_id, args.test_fold_index))
     
     args.save_model_checkpoint = not args.do_not_save_model_checkpoint
@@ -111,7 +96,6 @@ def main(args):
     ############################# MODEL SETUP #############################
     alphabet = Alphabet.from_architecture("ESM-1b")
     model = ProteinNPTModel(args, alphabet)
-    model_name = f"{args.run_name}_{assay_id}"
     ############################# MODEL SETUP #############################
 
     ############################# GET PATHS TO ASSAY DATA #############################
@@ -120,92 +104,23 @@ def main(args):
         assay_file_names[target] = assay_file_name
     ############################# GET PATHS TO ASSAY DATA #############################
 
-    ############################# GET TRAINING DATA #############################  
-    if args.target_processing_location and os.path.exists(args.target_processing_location):
-        target_processing = json.load(open(args.target_processing_location))
-        train_data, _ = get_dataset_from_csv_file(args, args.train_data_location, args.metadata_cols, target_processing=target_processing)
-    else:
-        train_data, target_processing = get_dataset_from_csv_file(args, args.train_data_location, args.metadata_cols)
-    
-    print("############################################ TARGET PROCESSING ############################################")
-    for target_name, target_config in args.target_config.items():
-        assert target_name in target_processing, f"Target {target_name} not found in target processing"
-        target_stats = target_processing[target_name]
-        print(f"Target: {target_name}")
-        pprint(target_config)
-        pprint(target_stats)
-        print()
-    print("############################################################################################################")
-    
-    # save the target processing dict to json file in output dir
-    with open(args.output_dir + os.sep + 'target_processing.json', 'w') as f:
-        json.dump(target_processing, f)
-    
-    val_datas = {}
-    test_data = None
-    
-    for val_data_loc in args.eval_data_locations:
-        filename = val_data_loc.split(".csv")[0].split(os.sep)[-1]
-        val_dataset, _ = get_dataset_from_csv_file(args, val_data_loc, args.metadata_cols, target_processing=target_processing)
-        val_datas[filename] = val_dataset
-
-    if args.eval_save_on_name is not None:
-        assert args.eval_save_on_name in val_datas.keys(), f"Eval save on name {args.eval_save_on_name} not found in eval data locations"
-    else:
-        args.eval_save_on_name = list(val_datas.keys())[0]
-    
-    if args.test_data_location is not None:
-        test_data, _ = get_dataset_from_csv_file(args, args.test_data_location, args.metadata_cols, target_processing=target_processing)
-
-    MSA_start_position = args.MSA_start = 1
-    MSA_end_position = args.MSA_end = len(train_data[0]['mutant_mutated_seq_pairs'][1])
-    args.seq_len = MSA_end_position
-    args.MSA_seq_len = MSA_end_position - MSA_start_position + 1
     ############################# GET TRAINING DATA #############################
-
-    ############################# SETUP SAMPLING EVAL FROM SEED #############################
-    cg_oracle_fns = {}
-    if args.eval_cg_from_seed:
-        from conditional_plm.oracles import ThermoOracle, AffinityOracle
-        from conditional_plm.data.capulet import get_capulet_reference_sequence
-
-        print()
-        print("SAMPLING PARAMETERS")
-        print(f"Number of sampling attempts: {args.n}")
-        print(f"Probabilistic AA mask: {args.proba_aa_mask}")
-        print()
-        
-        for name, stats, cond_method in zip(target_processing.keys(), target_processing.values(), args.cond_methods):
-            try:
-                target_fitness_value = float(cond_method)
-            except ValueError:
-                assert cond_method in stats, f"Conditioning method {cond_method} not found in stats"
-                target_fitness_value = stats[cond_method]
-            if args.target_config[name]["standardize"]:
-                normalized_cond_value = (target_fitness_value - stats['mean']) / stats['std']
-            else:
-                normalized_cond_value = target_fitness_value
-            print(f"Target: {name}, conditioning on: {target_fitness_value} => {normalized_cond_value:.2f}")
-
-        therm_oracle = ThermoOracle.load_default()
-        aff_oracle = AffinityOracle.load_default()
-        ref_seq = get_capulet_reference_sequence()
-        cg_oracle_fns["tm"] = lambda samples: therm_oracle.forward(samples, ref_seq).cpu().detach().numpy()
-        cg_oracle_fns["kdpe"] = lambda samples: aff_oracle.forward(samples, ref_seq).cpu().detach().numpy()
-    ############################# VERIFY SAMPLING EVAL FROM SEED #############################
+    MSA_start_position = args.MSA_start
+    MSA_end_position = args.MSA_end
     
-    if args.use_wandb:
-        # wandb.login(key=os.getenv("WANDB_API_KEY"))   # No need for this as wandb.init() pulls the key from the environment
-        combined_dict = {**vars(args), "parameter_count": sum(p.numel() for p in model.parameters()), "assay_id": assay_id }
-        wandb.init(project="protnpt", config=combined_dict, name=model_name, dir=args.wandb_location, save_code=True)
+    train_data, val_data, test_data, target_processing = get_train_val_test_data(
+        args = args,
+        assay_file_names = assay_file_names,
+        metadata_cols = args.metadata_cols,
+    )
+    ############################# GET TRAINING DATA #############################
     
     ############################# TRAINING #############################
     trainer = Trainer(
         model=model,
         args=args,
         train_data=train_data, 
-        val_datas=val_datas,
-        cg_oracle_fns=cg_oracle_fns,
+        val_data=val_data,
         MSA_sequences=None, 
         MSA_weights=None,
         MSA_start_position=MSA_start_position,
@@ -215,8 +130,10 @@ def main(args):
     )
 
     # Load model from checkpoint or train from scratch
-    if args.load_model_checkpoint and os.path.exists(args.model_checkpoint_location):
-        checkpoint = torch.load(args.model_checkpoint_location)
+    if args.load_model_checkpoint:
+        checkpoint_location = args.output_dir + os.sep + 'checkpoint.t7'
+        checkpoint = torch.load(checkpoint_location)
+        # load the state dictionary into your model
         model.load_state_dict(checkpoint['state_dict'], strict=False)
         trainer_final_status = {
             'total_training_steps': -1,
@@ -225,50 +142,72 @@ def main(args):
         }
         model.cuda()
         model.set_device()
-        print(f"Model loaded from checkpoint {args.model_checkpoint_location}")
 
-    trainer_final_status = trainer.train()
-    print('Final training step: {} | Num training epochs: {} | Total train time: {} hrs'.format(trainer_final_status['total_training_steps'], trainer_final_status['total_training_epochs'], str(trainer_final_status['total_train_time'] / 3600)))
-    ############################# TRAINING #############################
+    selected_indices = []
 
-    ############################# SAVE MODEL #############################
-    model_save_path = args.model_location + os.sep + 'final' + os.sep + 'checkpoint.t7'
-    os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
-    torch.save({
-        'args': args,
-        'state_dict': model.state_dict(),
-        'final_training_step': trainer_final_status['total_training_steps'],
-    }, model_save_path)
-    ############################# SAVE MODEL #############################
-
-    ############################# EVALUATION #############################
-    if args.test_data_location is None:
-        del model; del trainer
-        gc.collect(); torch.cuda.empty_cache()
-        if args.use_wandb: wandb.finish()
-        return
+    # Decide how to choose training samples that are used for sampling conditioning
+    if args.eval_num_closest_fitness_training_sequences > 0:
+        # Select eval_num_closest_fitness_training_sequences closest training samples to the target sequence by fitness
+        for name, cond_method in zip(target_processing.keys(), args.cond_methods):
+            try:
+                target_fitness_value = float(cond_method)
+            except ValueError:
+                assert cond_method in target_processing[name], f"Conditioning method {cond_method} not found in stats"
+                target_fitness_value = target_processing[name][cond_method]
+            
+            fitness_diff = np.abs(np.array(train_data[name]) - target_fitness_value)
+            lowest_index = np.argsort(fitness_diff)[:args.eval_num_closest_fitness_training_sequences]
+            selected_indices.extend(list(lowest_index))
+        
+    if args.eval_num_closest_oasis_training_sequences > 0:
+        # Select closest training samples to the target sequence by OASIS percentile
+        target_oasis_percentile = args.target_oasis_percentile
+        assert target_oasis_percentile is not None, "Target OASIS percentile not provided"
+        assert 'oasis_percentile' in train_data.features.keys(), "OASIS percentile not found in training data"
+        oasis_percentile_values = np.array(train_data['oasis_percentile'])
+        oasis_diff = np.abs(oasis_percentile_values - target_oasis_percentile)
+        lowest_index = np.argsort(oasis_diff)[:args.eval_num_closest_oasis_training_sequences]
+        assert not np.isnan(oasis_percentile_values[lowest_index]).any(), "Nan values found in lowest_index"
+        selected_indices.extend(list(lowest_index))
     
-    test_preds = trainer.predict(
-        data=test_data,
-        train_data=train_data,
+    elif args.eval_num_random_training_sequences > 0:
+        # Select some random training sequences and add to selected indices
+        random_indices = np.random.choice(len(train_data), args.eval_num_random_training_sequences, replace=False)
+        selected_indices.extend(list(random_indices))
+    
+    if len(selected_indices) < args.eval_num_training_sequences_per_batch_per_gpu:
+        print("WARNING: Not enough training samples to sample from. Using all training samples")
+    elif len(selected_indices) > 0:
+        print(f"Selected {len(set(selected_indices))} training samples for conditioning")
+        train_data = train_data.select(list(set(selected_indices)))
+
+    print()
+    print("SAMPLING PARAMETERS")
+    print(f"Number of sampling attempts: {args.n}")
+    print(f"Probabilistic AA mask: {args.proba_aa_mask}")
+
+    for name, stats, cond_method in zip(target_processing.keys(), target_processing.values(), args.cond_methods):
+        try:
+            target_fitness_value = float(cond_method)
+        except ValueError:
+            assert cond_method in stats, f"Conditioning method {cond_method} not found in stats"
+            target_fitness_value = stats[cond_method]
+        if args.target_config[name]["standardize"]:
+            normalized_cond_value = (target_fitness_value - stats['mean']) / stats['std']
+        else:
+            normalized_cond_value = target_fitness_value
+        print(f"Target: {name}, conditioning on: {target_fitness_value} => {normalized_cond_value:.2f}")
+    
+    print()
+
+    samples = trainer.sample(
+        cond_methods=args.cond_methods,
+        train_data = train_data,
+        proba_aa_mask = args.proba_aa_mask,
+        n=args.n,
     )
-    test_logs = {}
-    for target_name in target_names:
-        preds = np.array(test_preds[f"predictions_{target_name}"])
-        labels = np.array(test_preds[f"labels_{target_name}"])
-        test_logs[f"pp_{target_name}_spearmanr"] = pnpt_spearmanr(preds, labels)
-
-    if args.use_wandb:
-        wandb.log(test_logs)
-        wandb.finish()
-
-    test_preds_df = pd.DataFrame(test_preds)
-    test_preds_df.to_csv(args.output_scores_location + os.sep + f"{model_name}_test_preds.csv", index=False)
-    ############################# EVALUATION #############################
-
-    # Freeing up GPU memory after training on a given fold split:
-    del model; del trainer
-    gc.collect(); torch.cuda.empty_cache()
+    print(f"Generated {len(samples)} samples")
+    return samples
 
 
 if __name__ == "__main__":
@@ -282,16 +221,16 @@ if __name__ == "__main__":
         help='Training output will be stored there (i.e., checkpoints and test set predictions).'
     )
     parser.add_argument(
+        '--save_dir',
+        type=str,
+        default=os.getenv("SM_MODEL_DIR"),
+        help='Training output will be stored there (i.e., checkpoints and test set predictions).'
+    )
+    parser.add_argument(
         '--input_dir',
         type=str,
         default=os.getenv("SM_CHANNEL_TRAIN"),
         help='Training data will be stored there'
-    )
-    parser.add_argument(
-        '--model_checkpoint_dir',
-        type=str,
-        default=os.getenv("SM_CHANNEL_MODEL_CHECKPOINT"),
-        help='Directory where input model checkpoint files are stored if we want to resume training'
     )
     parser.add_argument(
         '--model_config_dir',
@@ -311,13 +250,8 @@ if __name__ == "__main__":
         default=os.getenv("SM_CHANNEL_RUN_NAME", "samples"),
         help='Name of the run'
     )
-
-    parser.add_argument('--target_processing_filename', default=None, type=str, help='Name of the target processing file')
-    parser.add_argument('--train_data_filename', default="datum.csv", type=str, help='Name of the training data file')
-    parser.add_argument('--eval_data_filenames', default=[], type=str, nargs='+', help='Name of the evaluation data file(s)')
-    parser.add_argument('--eval_save_on_name', default=None, type=str, help='Name of the evaluation data file to use for model saving')
-    parser.add_argument('--test_data_filename', default=None, type=str, help='Name of the test data file (optional)')
-
+    
+    parser.add_argument('--assay_data_location', default="datum.csv", type=str, help='Path to assay data file')
     parser.add_argument('--metadata_cols', default=[], type=str, nargs='+', help='Columns to use as metadata')
     parser.add_argument('--model_config_name', default="model_config.json", type=str, help='Model configuration file name')
     parser.add_argument('--target_config_name', default="target_config.json", type=str, help='Target configuration file name')
@@ -329,16 +263,13 @@ if __name__ == "__main__":
     parser.add_argument('--zero_shot_fitness_predictions_location', default=None, type=str, help='Path to zero-shot fitness predictions used as additional covariates (baselines) or auxiliary labels (ProteinNPT)')
     
     parser.add_argument('--aho_aligned', type=str2bool, nargs='?', const=True, default=False, help='Whether the Aho aligned sequences are used')
-    parser.add_argument('--n', default=1000, type=int, help='Number of samples to generate')
+    parser.add_argument('--n', default=1, type=int, help='Number of samples to generate')
     parser.add_argument('--cond_methods', default=["mean+1std"], type=str, nargs='+', help='Conditioning methods')
     parser.add_argument('--num_avg_mutations', default=6., type=float, help='Number of average mutations in the generated sequences')
     parser.add_argument('--target_oasis_percentile', default=None, type=float, help='Target OASIS percentile')
-    parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context')
     
-    parser.add_argument('--eval_cg_from_seed', type=str2bool, nargs='?', const=True, default=True, help='Whether to evaluate from seed')
     parser.add_argument('--eval_num_random_training_sequences', default=0, type=int, help='Number of random training sequences to be leveraged at inference time')
     parser.add_argument('--eval_num_closest_oasis_training_sequences', default=0, type=int, help='Number of most human like training sequences to be leveraged at inference time')
-    parser.add_argument('--eval_num_closest_aligned_sequences', default=0, type=int, help='Number of closest aligned sequences to the target sequence to be leveraged at inference time')
     parser.add_argument('--eval_num_closest_fitness_training_sequences', default=0, type=int, help='Number of closest training sequences to the target sequence by fitness to be leveraged at inference time')
     parser.add_argument('--eval_num_training_sequences_per_batch_per_gpu', default=None, type=int, help='Number of sequences from training (with label) at inference time [ProteinNPT only]')
 
@@ -350,7 +281,7 @@ if __name__ == "__main__":
     # Data parameters
     parser.add_argument('--wandb_location', default="wandb", type=str, help='Wandb directory where metadata is stored')
     parser.add_argument('--augmentation', default=None, type=str, help='Type of augmentation used ["None","zero_shot_fitness_predictions_covariate" or "zero_shot_fitness_predictions_auxiliary_labels"]. Note that default value is set in each model config files')
-    parser.add_argument('--fold_variable_name', default="train_test_split", type=str, help='Name of the fold variable in the processed assay files')
+    parser.add_argument('--fold_variable_name', default=None, type=str, help='Name of the fold variable in the processed assay files')
     parser.add_argument('--test_fold_index', default=-1, type=int, help='Index of fold to test performance on [If "-1" is provided, we will train on all seed splits sequentially]')
     parser.add_argument('--use_validation_set', type=str2bool, nargs='?', const=True, default=False, help='Whether to use a validation set during training [If yes, we will stop training based on CV loss and patience param. Train until the end otherwise]')
     parser.add_argument('--num_data_loaders_workers', default=0, type=int, help='Number of workers to use to fetch and load data in memory')
@@ -437,20 +368,40 @@ if __name__ == "__main__":
         args.target_seq_mutable_mask = [True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, False, True, False, True, True, True, True, False, False, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True]
         args.target_seq_cdr_mask = [False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False, False, False]
     
-    if args.eval_cg_from_seed:
-        clean_target_seq = args.target_seq.replace('-', '')
-        args.proba_aa_mask = args.num_avg_mutations / len(clean_target_seq)
-        assert len(args.target_seq) == len(args.target_seq_mutable_mask), \
-            "Target sequence, mutable mask and CDR mask must have the same length"
+    clean_target_seq = args.target_seq.replace('-', '')
+    args.proba_aa_mask = args.num_avg_mutations / len(clean_target_seq)
+
+    assert len(args.target_seq) == len(args.target_seq_mutable_mask), \
+        "Target sequence, mutable mask and CDR mask must have the same length"
 
     if (args.MSA_start is None) or (args.MSA_end is None):
         args.MSA_start = 1
         if args.target_seq:
             args.MSA_end = len(args.target_seq)
 
-
-    ############################# START TRAINING #############################
+    ############################# RUN SAMPLING #############################
     os.environ["PARTNER"] = "capulet"
     os.environ["DEPLOYMENT_ENVIRONMENT"] = "prod"
+    from conditional_plm.oracles import ThermoOracle
+    from conditional_plm.data.capulet import get_capulet_reference_sequence
+    from conditional_plm.data.humanness import biophi_v_humannesses, DEFAULT_MIN_PERCENT_SUBJECTS
 
-    main(args)
+    samples = main(args)
+    therm_oracle = ThermoOracle.load_default()
+    ref_seq = get_capulet_reference_sequence()
+
+    tm_preds = therm_oracle.forward(samples, ref_seq)
+    biophi_objs = biophi_v_humannesses(samples)
+    oasis_percentile = np.array([obj.get_oasis_percentile(DEFAULT_MIN_PERCENT_SUBJECTS / 100) for obj in biophi_objs])
+    rmse_oasis_percentile = np.sqrt(np.mean(oasis_percentile - args.target_oasis_percentile)**2)
+
+    df = pd.DataFrame({'sequence': samples})
+    df['tm_mean'] = tm_preds.cpu().detach().numpy()
+    df['oasis_percentile'] = oasis_percentile
+
+    print(f"Mean TM: {np.mean(df['tm_mean'])}")
+    print(f"Mean OASIS percentile: {np.mean(df['oasis_percentile'])}")
+    print(f"RMSE OASIS percentile: {rmse_oasis_percentile}")
+    
+    df.to_csv(os.path.join(args.save_dir, f"{args.run_name}.csv"), index=False)
+    breakpoint()

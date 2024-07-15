@@ -400,6 +400,47 @@ class ProteinNPTModel(nn.Module):
                 
                 total_loss += target_prediction_loss_weight * target_prediction_loss[target_name]
         return total_loss, reconstruction_loss, target_prediction_loss
+    
+    def self_consistency_loss(self, gt_labels, masked_targets, target_predictions, self_consistency_loss_weight):
+        self_consistency_loss = {}
+        directionality_loss = {}
+        num_cc_targets = defaultdict(int)
+        num_signed_conditionals = defaultdict(int)
+        total_loss = 0.0
+
+        for target_name in self.target_names:
+            if self.args.target_config[target_name]["in_NPT_loss"]:
+                cc_unmasked_locations = masked_targets[target_name][:,1].eq(0.0)
+                num_cc_targets[target_name] += cc_unmasked_locations.sum()
+                if cc_unmasked_locations.sum() == 0:
+                    # We don't have any unmasked values for this target, so we can't compute a self-consistency loss
+                    self_consistency_loss[target_name] = torch.tensor(0.0)
+                    directionality_loss[target_name] = torch.tensor(0.0)
+                else:
+                    conditional_target_values = masked_targets[target_name][cc_unmasked_locations][:,0]
+                    ground_truth_target_values = gt_labels[target_name].to(self.device)[cc_unmasked_locations]
+                    predicted_target_values = target_predictions[target_name][cc_unmasked_locations]
+
+                    sign_of_condition = torch.sign(conditional_target_values - ground_truth_target_values)
+                    sign_of_prediction = torch.sign(predicted_target_values - ground_truth_target_values)
+                    sign_of_prediction[sign_of_condition.eq(0.0)] = 0.0
+                    num_signed_conditionals[target_name] += sign_of_condition.ne(0.0).sum()
+                    
+                    if self.args.target_config[target_name]["type"]=="continuous":
+                        self_consistency_loss[target_name] = MSELoss(reduction="mean")(predicted_target_values, conditional_target_values)
+                        directionality_loss[target_name] = MSELoss(reduction="mean")(sign_of_prediction, sign_of_condition)
+                    else:
+                        raise ValueError("Self-consistency loss not implemented for categorical targets yet")
+
+                    if torch.isnan(self_consistency_loss[target_name]).sum() > 0:
+                        print("Detected nan loss in self-consistency loss")
+                    if torch.isnan(directionality_loss[target_name]).sum() > 0:
+                        print("Detected nan loss in directionality loss")
+
+                    total_loss += self_consistency_loss_weight * self_consistency_loss[target_name]
+                    total_loss += self_consistency_loss_weight * directionality_loss[target_name]
+        
+        return total_loss, self_consistency_loss, directionality_loss, num_cc_targets, num_signed_conditionals
 
     def create_optimizer(self):
         """

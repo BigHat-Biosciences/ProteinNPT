@@ -7,8 +7,10 @@ import h5py
 from datasets import Dataset
 from proteinnpt.utils.tranception.utils.scoring_utils import get_mutated_sequence
 
+
 def standardize(x, epsilon = 1e-10):
     return (x - x.mean()) / (x.std() + epsilon)
+
 
 def split_data_based_on_test_fold_index(dataframe, fold_variable_name = 'fold_modulo_5', test_fold_index=None, use_validation_set=True):
     unique_folds = np.unique(dataframe[fold_variable_name])
@@ -37,6 +39,7 @@ def split_data_based_on_test_fold_index(dataframe, fold_variable_name = 'fold_mo
     del test[fold_variable_name]
     return train, val, test
 
+
 def cleanup_ids_assay_data(df, indel_mode=False, target_seq=None):
     assert 'mutated_sequence' in df.columns or 'mutant' in df.columns, "assay did not reference mutant nor mutated_sequence"
     if 'mutated_sequence' not in df: 
@@ -47,6 +50,56 @@ def cleanup_ids_assay_data(df, indel_mode=False, target_seq=None):
         else: #If indels we default to dummy mutant names
             df['mutant'] = df.index.to_series().apply(lambda x: "mutant_" + str(x))
     return df
+
+
+def get_dataset_from_csv_file(args, assay_file_name, metadata_cols=[], sequence_col='mutated_sequence', target_processing=None):
+    target_names = args.target_config.keys()
+    target_var_names = [args.target_config[target_name]["var_name"] for target_name in target_names]
+    
+    assay_data_df = pd.read_csv(assay_file_name)
+    assert sequence_col in assay_data_df.columns, "Sequence column not found in assay data" 
+    assay_data_df.rename(columns={sequence_col: 'mutated_sequence'}, inplace=True)
+    assay_data_df = cleanup_ids_assay_data(assay_data_df)
+    
+    for target_name, target_var_name in zip(target_names, target_var_names):
+        if target_name in assay_data_df.columns: continue
+        if target_var_name in assay_data_df.columns:
+            assay_data_df.rename(columns={target_var_name: target_name}, inplace=True)
+            continue
+
+        print(f"Target {target_var_name} not found in assay data. Trying to impute...")
+        target_config = args.target_config[target_name]
+        if 'predict_impute' not in target_config:
+            raise ValueError(f"Target {target_name} not found in assay data and predict_impute not set to value")
+        
+        print(f"Imputing target {target_name} with value {target_config['predict_impute']}")
+        assay_data_df[target_name] = [target_config['predict_impute']] * len(assay_data_df)
+
+    dataset = {}
+    dataset['mutant_mutated_seq_pairs'] = list(zip(assay_data_df['mutant'], assay_data_df['mutated_sequence']))
+    dataset['index'] = list(range(len(assay_data_df)))
+    raw_targets = { target_name: assay_data_df[target_name] for target_name in target_names }
+
+    if target_processing is None:
+        raw_targets, target_processing = preprocess_training_targets(raw_targets, args.target_config)
+    else:
+        _, test_target_processing = preprocess_training_targets(raw_targets, args.target_config, verbose=False, only_stats=True)
+        raw_targets = preprocess_test_targets(raw_targets, args.target_config, target_processing)
+        target_processing = test_target_processing
+
+    for target_name in target_names:
+        dataset[target_name] = raw_targets[target_name]
+
+    for col in metadata_cols:
+        if col not in assay_data_df.columns:
+            print(f"Metadata column {col} not found in assay data. Skipping...")
+            continue
+        dataset[col] = assay_data_df[col]
+
+    # load dict into dataset objects
+    data = Dataset.from_dict(dataset)
+    return data, target_processing
+
 
 def get_train_val_test_data(args, assay_file_names, metadata_cols=[]):
     target_names = args.target_config.keys() 
@@ -112,16 +165,44 @@ def get_train_val_test_data(args, assay_file_names, metadata_cols=[]):
     test_data = Dataset.from_dict(splits_dict['test'])
     return train_data, val_data, test_data, target_processing
 
-def create_seed_val_data(args, target_processing, n=1000):
-    """Creates a Dataset object with repeated seed sequences"""
+
+def create_seed_val_data(args, target_processing, cond_methods=[], n=1000):
+    """
+    Creates a Dataset object with repeated seed sequences conditioned on target values
+    following the specified conditining method per target (mean+1std by default).
+    
+    Conditioning Methods:
+    - mean+1std : value = mean + std of training set
+    - mean-1std : value = mean - std of training set
+    """
     assert args.target_seq is not None, "Target sequence not provided"
     assert args.augmentation == "None", "Augmentation not supported for seed data"
+    if len(cond_methods) != len(target_processing):
+        print("WARNING: Number of condition methods does not match number of targets. Defaulting to 'mean+1std' for all targets.")
+        cond_methods = ['mean+1std'] * len(target_processing)
+
     mutant_mutated_seq_pairs = [(f"mutant_{i}", args.target_seq) for i in range(n)]
     raw_targets = {target_name: {} for target_name in args.target_config.keys()}
-    for target_name, target_stats in target_processing.items():
-        # We seed the targets with the mean + std of the training set
-        assert 'mean' in target_stats and 'std' in target_stats, "Target stats not found"
-        seed_value = target_stats['mean'] + target_stats['std']
+    
+    for i, (target_name, target_stats) in enumerate(target_processing.items()):
+        cond_method = cond_methods[i]
+        if cond_method == 'mean+1std':
+            assert 'mean' in target_stats and 'std' in target_stats, "Target stats not found"
+            seed_value = target_stats['mean'] + target_stats['std']
+        elif cond_method == 'mean-1std':
+            assert 'mean' in target_stats and 'std' in target_stats, "Target stats not found"
+            seed_value = target_stats['mean'] - target_stats['std']
+        else:
+            try:
+                seed_value = float(cond_method)
+            except ValueError:
+                assert cond_method in target_stats, f"{cond_method} not found in target state for {target_name}"
+                seed_value = target_stats[cond_method]
+
+        # Now we standardize the seed value if needed
+        if args.target_config[target_name]["standardize"]:
+            seed_value = (seed_value - target_stats['mean']) / target_stats['std']
+
         seed_targets = torch.tensor([seed_value] * n)
         raw_targets[target_name] = seed_targets
     return Dataset.from_dict({
@@ -129,7 +210,8 @@ def create_seed_val_data(args, target_processing, n=1000):
         **raw_targets
     })
 
-def preprocess_training_targets(training_targets, target_config, verbose=True):
+
+def preprocess_training_targets(training_targets, target_config, verbose=True, only_stats=False):
     """
     training_targets: dict of tensors of target values. Assumed to be 1D continuous values or 1D categorical values
     
@@ -144,9 +226,15 @@ def preprocess_training_targets(training_targets, target_config, verbose=True):
             target_processing[target_name]={}
             target_processing[target_name]['mean']=np.nanmean(training_targets[target_name])
             target_processing[target_name]['std']=np.nanstd(np.array(training_targets[target_name]))
+            target_processing[target_name]['max']=np.nanmax(np.array(training_targets[target_name]))
+            target_processing[target_name]['min']=np.nanmin(np.array(training_targets[target_name]))
+            target_processing[target_name]['P99']=np.nanquantile(np.array(training_targets[target_name]), q=0.99)
             target_processing[target_name]['P95']=np.nanquantile(np.array(training_targets[target_name]), q=0.95)
+            target_processing[target_name]['P85']=np.nanquantile(np.array(training_targets[target_name]), q=0.85)
             target_processing[target_name]['P75']=np.nanquantile(np.array(training_targets[target_name]), q=0.75)
-            if target_config[target_name]["standardize"]:
+            target_processing[target_name]['P50']=np.nanquantile(np.array(training_targets[target_name]), q=0.50)
+            target_processing[target_name]['P25']=np.nanquantile(np.array(training_targets[target_name]), q=0.25)
+            if target_config[target_name]["standardize"] and not only_stats:
                 training_targets[target_name] = (training_targets[target_name] - target_processing[target_name]['mean']) / target_processing[target_name]['std']
         else:
             # One-hot encoding
@@ -157,11 +245,13 @@ def preprocess_training_targets(training_targets, target_config, verbose=True):
             index_to_category = dict((i, c) for i, c in enumerate(unique_categories))
             category_to_index['<mask>'] = len(unique_categories) #Set <mask> category to largest index value
             index_to_category[len(unique_categories)] = '<mask>'
-            training_targets[target_name] = torch.tensor([category_to_index[val] for val in training_targets[target_name]])
+            if not only_stats:
+                training_targets[target_name] = torch.tensor([category_to_index[val] for val in training_targets[target_name]])
             target_processing[target_name]['category_to_index'] = category_to_index
             target_processing[target_name]['index_to_category'] = index_to_category
     if verbose: print("Target processing train set: {}".format(target_processing))
     return training_targets, target_processing
+
 
 def preprocess_test_targets(test_targets, target_config, target_processing):
     """
@@ -175,6 +265,7 @@ def preprocess_test_targets(test_targets, target_config, target_processing):
             test_targets[target_name] = torch.tensor([target_processing[target_name]['category_to_index'][val] for val in test_targets[target_name]])
     return test_targets
 
+
 def mask_protein_sequences(
     inputs,
     alphabet,
@@ -182,7 +273,8 @@ def mask_protein_sequences(
     proba_random_mutation=0.1,
     proba_unchanged=0.1,
     aa_can_mask=None,
-    rows_cannot_mask=None
+    rows_cannot_mask=None,
+    min_num_masked_aa=None
 ):
     """
     Masks amino acids in the MSA at random with proba proba_aa_mask (15% by default).
@@ -230,7 +322,17 @@ def mask_protein_sequences(
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
     return inputs, labels, masked_indices
     
-def mask_targets(inputs, input_target_type , target_processing, proba_target_mask=0.15, proba_random_mutation=0.1, proba_unchanged=0.1, min_num_labels_masked=None):
+
+def mask_targets(
+    inputs,
+    input_target_type,
+    target_processing,
+    proba_target_mask=0.15,
+    proba_random_mutation=0.1,
+    proba_random_unmasked_mutation=0.0,
+    proba_unchanged=0.1,
+    min_num_labels_masked=None
+):
     """
     Masks targets at random with proba proba_target_mask.
     inputs is a tensor with the target values for a *single* target.
@@ -245,8 +347,9 @@ def mask_targets(inputs, input_target_type , target_processing, proba_target_mas
     indices_missing_values = torch.isnan(inputs)
     probability_tensor = torch.full(inputs.shape, proba_target_mask)
     probability_tensor.masked_fill_(indices_missing_values, value=0.0) #This will help ensure we do not mask missing values (we have no ground truth values to compute the loss against for these)
-    masked_indices = torch.bernoulli(probability_tensor).bool() #tensor indicating which entries should be masked and used in loss computation.
-    
+    masked_indices = torch.bernoulli(probability_tensor).bool() # tensor indicating which entries should be masked and used in loss computation.
+    unmasked_indices = ~masked_indices
+
     if min_num_labels_masked is not None and min_num_labels_masked > 0: #Routine to help enforce we mask at least min_num_labels_masked labels, eg., to ensure we do compute a prediction loss
         if masked_indices.int().sum().item() < min_num_labels_masked: #We sample additional masks as needed
             num_additional_masks_needed = min_num_labels_masked - masked_indices.int().sum().item()
@@ -255,7 +358,7 @@ def mask_targets(inputs, input_target_type , target_processing, proba_target_mas
             masked_indices = np.array(masked_indices)
             masked_indices[selected_indices] = True
             masked_indices = torch.tensor(masked_indices)
-    labels[~masked_indices] = -100 #All non masked items (incl. missing values) are excluded from loss computation.
+    labels[~masked_indices] = -100 # All non masked items (incl. missing values) are excluded from loss computation.
     
     # proba_actual_masking of the time (80% by default), we replace masked input tokens with tokenizer.mask_token (<mask>)
     proba_actual_masking = 1.0 - proba_random_mutation - proba_unchanged
@@ -266,6 +369,7 @@ def mask_targets(inputs, input_target_type , target_processing, proba_target_mas
     else:
         inputs[indices_replaced] = target_processing['category_to_index']['<mask>']
         inputs[indices_missing_values] = target_processing['category_to_index']['<mask>']
+
     # proba_random_mutation of the time (10% by default), we replace masked input tokens with random word
     if proba_random_mutation > 0:
         rescaled_proba = proba_random_mutation / (proba_random_mutation + proba_unchanged)
@@ -276,16 +380,27 @@ def mask_targets(inputs, input_target_type , target_processing, proba_target_mas
             random_tokens = torch.randint(low=0, high=target_processing['category_to_index']['<mask>'], size=labels.shape, dtype=torch.long)
         inputs[indices_random] = random_tokens[indices_random]
     
+    # proba_random_unmasked_mutation of the time, we replace unmasked input tokens with random word
+    if proba_random_unmasked_mutation > 0:
+        indices_random = torch.bernoulli(torch.full(labels.shape, proba_random_unmasked_mutation)).bool() & unmasked_indices
+        if input_target_type=='continuous':
+            random_tokens = torch.tensor(np.random.normal(loc=0.0, scale=1.0, size=labels.shape)).float()
+        else:
+            random_tokens = torch.randint(low=0, high=target_processing['category_to_index']['<mask>'], size=labels.shape, dtype=torch.long)
+        inputs[indices_random] = random_tokens[indices_random]
+
     # concatenate mask value to input tensor (only for continuous; by design we reserved the last category index to <mask> so will be automatically handled in Embedding layer)
     if input_target_type=='continuous':
         indices_masked_or_missing = masked_indices | indices_missing_values
         inputs = torch.cat((inputs.view(-1,1), indices_masked_or_missing.float().view(-1,1)), dim=-1)
+    
     #inputs is the modified version of input in which masked tokens are zeroed out / imputed (to be passed to the model as input). Labels corresponds ground truth values to be predicted at masked positions (-100 otherwise)
     return inputs, labels 
 
+
 def collate_fn_protein_npt(raw_batch):
     keys = raw_batch[0].keys()
-    target_keys = list(set(keys)-set(['mutant_mutated_seq_pairs'])) #target_keys also includes zero-shot fitness predictions if we pass that as input as well
+    target_keys = list(set(keys)-set(['mutant_mutated_seq_pairs'])) # target_keys also includes zero-shot fitness predictions if we pass that as input as well
     batch = {}
     for key in keys:
         batch[key] = []
@@ -296,6 +411,7 @@ def collate_fn_protein_npt(raw_batch):
     for key in target_keys:
         batch[key] = torch.tensor(batch[key])
     return batch
+
 
 def get_optimal_window(mutation_position_relative, seq_len_wo_special, model_window):
     """
@@ -315,6 +431,7 @@ def get_optimal_window(mutation_position_relative, seq_len_wo_special, model_win
         if (window_end - window_start) < model_window: # ensures all sequences will be same lengths (catch all for edge cases, due to non integer half_model_window)
             window_end +=1 
         return [window_start, window_end]
+
 
 def slice_sequences(list_mutant_mutated_seq_pairs, max_positions=1024, method="rolling", rolling_overlap=100, eval_mode=True, batch_target_labels=None, batch_masked_targets=None, target_names=None, start_idx=1, num_extra_tokens=1):
     """
@@ -347,6 +464,7 @@ def slice_sequences(list_mutant_mutated_seq_pairs, max_positions=1024, method="r
     else: #Baseline output
         return list_mutant_mutated_seq_pairs, batch_target_labels, scoring_optimal_window
 
+
 def get_indices_retrieved_embeddings(batch, embeddings_dict_location, number_of_mutated_seqs_to_score=None):
     batch_mutants, batch_sequences = zip(*batch['mutant_mutated_seq_pairs'])
     with h5py.File(embeddings_dict_location, 'r') as h5f:
@@ -361,9 +479,11 @@ def get_indices_retrieved_embeddings(batch, embeddings_dict_location, number_of_
     intersection = pd.merge(batch_mutants_df, mutants_embeddings_df, how='inner', on='mutants')
     return np.array(intersection['mutant_index'].values)
 
-def pnpt_spearmanr(prediction,target):
-    mask_missing_values = np.isnan(target) | np.equal(target, -100) #In PNPT missing values are never masked so corresponding labels are always set to -100
-    return spearmanr(prediction[~mask_missing_values], target[~mask_missing_values])[0] #first value is spearman rho, second is the corresponding p-value           
+
+def pnpt_spearmanr(prediction, target):
+    mask_missing_values = np.isnan(target) | np.equal(target, -100) # In PNPT missing values are never masked so corresponding labels are always set to -100
+    return spearmanr(prediction[~mask_missing_values], target[~mask_missing_values])[0] # first value is spearman rho, second is the corresponding p-value           
+
     
 def pnpt_count_non_nan(x):
     missing_mask = np.isnan(x) | np.equal(x,-100)
