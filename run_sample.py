@@ -4,11 +4,12 @@ import argparse
 import random
 import numpy as np
 import pandas as pd
+from pprint import pprint
 import torch
 
 from proteinnpt.proteinnpt.model import ProteinNPTModel
 from proteinnpt.utils.esm.data import Alphabet
-from proteinnpt.utils.data_utils import get_train_val_test_data
+from proteinnpt.utils.data_utils import get_dataset_from_csv_file
 from proteinnpt.utils.model_utils import Trainer
 
 
@@ -32,9 +33,9 @@ def setup_config_and_paths(args):
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir, exist_ok=True)
 
-    args.model_location = args.output_dir + os.sep + 'checkpoint'
     args.model_config_location = os.path.join(args.model_config_dir, args.model_config_name)
     args.target_config_location = os.path.join(args.target_config_dir, args.target_config_name)
+    args.target_processing_location = os.path.join(args.output_dir, args.target_processing_name)
 
     args.assay_data_location = os.path.join(args.input_dir, args.assay_data_location)                       # .csv file
     args.assay_data_folder = [ os.sep.join(args.assay_data_location.split(os.sep)[:-1]) ]                   # For now, we only support one assay target
@@ -108,11 +109,34 @@ def main(args):
     MSA_start_position = args.MSA_start
     MSA_end_position = args.MSA_end
     
-    train_data, val_data, test_data, target_processing = get_train_val_test_data(
-        args = args,
-        assay_file_names = assay_file_names,
-        metadata_cols = args.metadata_cols,
-    )
+    if os.path.exists(args.target_processing_location):
+        target_processing = json.load(open(args.target_processing_location))
+        train_data, _ = get_dataset_from_csv_file(args, args.assay_data_location, args.metadata_cols, target_processing=target_processing)
+    else:
+        train_data, target_processing = get_dataset_from_csv_file(args, args.assay_data_location, args.metadata_cols)
+
+    if args.seed_fitness_config is not None:
+        for target_name, value in args.seed_fitness_config.items():
+            if target_name not in target_processing:
+                print(f"WARNING: Target {target_name} not found in stats")
+                continue
+            target_processing[target_name]["seed"] = value
+    
+    sample_target_processing_loc = os.path.join(args.save_dir, "target_processing.json")
+    if not os.path.exists(sample_target_processing_loc):
+        with open(sample_target_processing_loc, 'w') as f:
+            json.dump(target_processing, f)
+
+    print("############################################ TARGET PROCESSING ############################################")
+    for target_name, target_config in args.target_config.items():
+        assert target_name in target_processing, f"Target {target_name} not found in target processing"
+        target_stats = target_processing[target_name]
+        target_processing[target_name]["mask"] = np.inf
+        print(f"Target: {target_name}")
+        pprint(target_config)
+        pprint(target_stats)
+        print()
+    print("############################################################################################################")
     ############################# GET TRAINING DATA #############################
     
     ############################# TRAINING #############################
@@ -120,7 +144,7 @@ def main(args):
         model=model,
         args=args,
         train_data=train_data, 
-        val_data=val_data,
+        val_datas=[],
         MSA_sequences=None, 
         MSA_weights=None,
         MSA_start_position=MSA_start_position,
@@ -132,6 +156,7 @@ def main(args):
     # Load model from checkpoint or train from scratch
     if args.load_model_checkpoint:
         checkpoint_location = args.output_dir + os.sep + 'checkpoint.t7'
+        assert os.path.exists(checkpoint_location), f"Checkpoint file {checkpoint_location} not found"
         checkpoint = torch.load(checkpoint_location)
         # load the state dictionary into your model
         model.load_state_dict(checkpoint['state_dict'], strict=False)
@@ -155,10 +180,13 @@ def main(args):
                 assert cond_method in target_processing[name], f"Conditioning method {cond_method} not found in stats"
                 target_fitness_value = target_processing[name][cond_method]
             
-            fitness_diff = np.abs(np.array(train_data[name]) - target_fitness_value)
-            lowest_index = np.argsort(fitness_diff)[:args.eval_num_closest_fitness_training_sequences]
+            if cond_method == "mask":
+                lowest_index = np.random.choice(len(train_data), args.eval_num_closest_fitness_training_sequences, replace=False)
+            else:
+                fitness_diff = np.abs(np.array(train_data[name]) - target_fitness_value)
+                lowest_index = np.argsort(fitness_diff)[:args.eval_num_closest_fitness_training_sequences]
             selected_indices.extend(list(lowest_index))
-        
+    
     if args.eval_num_closest_oasis_training_sequences > 0:
         # Select closest training samples to the target sequence by OASIS percentile
         target_oasis_percentile = args.target_oasis_percentile
@@ -196,7 +224,7 @@ def main(args):
             normalized_cond_value = (target_fitness_value - stats['mean']) / stats['std']
         else:
             normalized_cond_value = target_fitness_value
-        print(f"Target: {name}, conditioning on: {target_fitness_value} => {normalized_cond_value:.2f}")
+        print(f"Target: {name}, conditioning on '{cond_method}': {target_fitness_value} => {normalized_cond_value:.2f}")
     
     print()
 
@@ -255,6 +283,7 @@ if __name__ == "__main__":
     parser.add_argument('--metadata_cols', default=[], type=str, nargs='+', help='Columns to use as metadata')
     parser.add_argument('--model_config_name', default="model_config.json", type=str, help='Model configuration file name')
     parser.add_argument('--target_config_name', default="target_config.json", type=str, help='Target configuration file name')
+    parser.add_argument('--target_processing_name', default="target_processing.json", type=str, help='Target processing file name')
 
     parser.add_argument('--sequence_embeddings_location', default=None, type=str, help='Actual location of sequence embeddings .h5 file')
     parser.add_argument('--sequence_embeddings_folder', default=None, required=False, type=str, help='Folder with embeddings')
@@ -268,11 +297,14 @@ if __name__ == "__main__":
     parser.add_argument('--num_avg_mutations', default=6., type=float, help='Number of average mutations in the generated sequences')
     parser.add_argument('--target_oasis_percentile', default=None, type=float, help='Target OASIS percentile')
     
+    parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context')
+    parser.add_argument('--eval_num_closest_aligned_sequences', default=0, type=int, help='Number of closest aligned sequences to the target sequence to be leveraged at inference time')
     parser.add_argument('--eval_num_random_training_sequences', default=0, type=int, help='Number of random training sequences to be leveraged at inference time')
     parser.add_argument('--eval_num_closest_oasis_training_sequences', default=0, type=int, help='Number of most human like training sequences to be leveraged at inference time')
     parser.add_argument('--eval_num_closest_fitness_training_sequences', default=0, type=int, help='Number of closest training sequences to the target sequence by fitness to be leveraged at inference time')
     parser.add_argument('--eval_num_training_sequences_per_batch_per_gpu', default=None, type=int, help='Number of sequences from training (with label) at inference time [ProteinNPT only]')
-
+    
+    parser.add_argument('--seed_construct', default='vhh-capulet-001_0719_no-tag_5662', type=str, help='Seed construct')
     parser.add_argument('--target_seq', default=None, type=str, help='WT sequence mutated in the assay')
     parser.add_argument('--target_seq_mutable_mask', default=None, type=str2bool, nargs='+', help='Mask of mutable positions in the target sequence')
     parser.add_argument('--target_seq_cdr_mask', default=None, type=str, nargs='+', help='Mask of CDR positions in the target sequence')
@@ -339,69 +371,76 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     setup_config_and_paths(args)
+
+
+    ############################# SETUP SEED SEQUENCE #############################
+    os.environ["PARTNER"] = "capulet"
+    os.environ["DEPLOYMENT_ENVIRONMENT"] = "prod"
+    from bh.biocore.sequences.constructs import ConstructSvc
+    from conditional_plm.oracles import ThermoOracle, AffinityOracle
+    from conditional_plm.data.humanness import biophi_v_humanness, biophi_v_humannesses, DEFAULT_MIN_PERCENT_SUBJECTS
+    from conditional_plm.data.capulet import (
+        get_capulet_mutable_cdr_mask,
+        get_capulet_cdr_mask,
+        get_aho_aligned_sequence,
+        get_aho_aligned_mutable_mask,
+        get_aho_aligned_cdr_mask,
+        get_capulet_reference_sequence
+    )
+
+    seed_seq = ConstructSvc.get_by_name(args.seed_construct).get_part_aa_sequence()
+    ref_seq = get_capulet_reference_sequence()
+
+    therm_oracle = ThermoOracle.load_default()
+    aff_oracle = AffinityOracle.load_default()
     
     if args.aho_aligned:
-        args.target_seq = "KVQLVES-GGGVVQPGGSLRLSCAASG-FSFRN-----FGMSWVRQAPGKGPEWVSAISGS---GADTLYASPVKGRFIISRDNAKNTLYLQMNSLRPEDTAVYYCTIGGS------------------------LTRSSQGTLVTVSS---"
-        args.target_seq_mutable_mask = [True, True, True, True, True, True, True, False, True, True, True, True, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, True, \
-                                        True, False, True, True, True, True, True, False, False, False, False, False, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, True, True, \
-                                        True, True, True, True, True, True, True, True, False, False, False, True, True, True, \
-                                        False, True, False, True, True, True, True, False, False, True, True, True, True, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, \
-                                        False, False, False, False, False, False, False, False, False, False, False, False, False, \
-                                        False, False, False, False, False, False, False, False, False, False, False, True, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, False, False, False]
-        args.target_seq_cdr_mask = [False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, True, True, True, True, True, True, True, True, True, True, \
-                                                False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, True, True, True, True, True, True, True, True, True, True, \
-                                                True, True, True, True, True, True, True, False, False, False, False, False, \
-                                                False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, True, True, True, True, True, True, True, True, False, \
-                                                False, False, False, False, False, False, False, False, False, False]
+        args.target_seq = get_aho_aligned_sequence(seed_seq, "-")
+        args.target_seq_mutable_mask = get_aho_aligned_mutable_mask(args.target_seq)
+        args.target_seq_cdr_mask = get_aho_aligned_cdr_mask(args.target_seq)
     else:
-        args.target_seq = 'KVQLVESGGGVVQPGGSLRLSCAASGFSFRNFGMSWVRQAPGKGPEWVSAISGSGADTLYASPVKGRFIISRDNAKNTLYLQMNSLRPEDTAVYYCTIGGSLTRSSQGTLVTVSS'
-        args.target_seq_mutable_mask = [True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, False, True, False, True, True, True, True, False, False, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True]
-        args.target_seq_cdr_mask = [False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False, False, False]
+        args.target_seq = seed_seq
+        args.target_seq_mutable_mask = get_capulet_mutable_cdr_mask(args.target_seq)
+        args.target_seq_cdr_mask = get_capulet_cdr_mask(args.target_seq)
     
     clean_target_seq = args.target_seq.replace('-', '')
     args.proba_aa_mask = args.num_avg_mutations / len(clean_target_seq)
 
-    assert len(args.target_seq) == len(args.target_seq_mutable_mask), \
+    assert len(args.target_seq) == len(args.target_seq_mutable_mask) == len(args.target_seq_cdr_mask), \
         "Target sequence, mutable mask and CDR mask must have the same length"
+    
+    seed_tm = therm_oracle.forward([clean_target_seq], ref_seq).cpu().detach().item()
+    seed_kdpe = aff_oracle.forward([clean_target_seq], ref_seq).cpu().detach().item()
+    seed_oasis = biophi_v_humanness(clean_target_seq).get_oasis_percentile(DEFAULT_MIN_PERCENT_SUBJECTS / 100)
 
-    if (args.MSA_start is None) or (args.MSA_end is None):
-        args.MSA_start = 1
-        if args.target_seq:
-            args.MSA_end = len(args.target_seq)
+    print(f"Seed TM: {seed_tm}")
+    print(f"Seed KDPE: {seed_kdpe}")
+    print(f"Seed OASIS percentile: {seed_oasis}")
+
+    args.MSA_start = 1
+    args.MSA_end = len(args.target_seq)
+    args.seed_fitness_config = { "tm_mean": seed_tm, "kdpe_mean": seed_kdpe, "oasis_percentile": seed_oasis }
+
 
     ############################# RUN SAMPLING #############################
-    os.environ["PARTNER"] = "capulet"
-    os.environ["DEPLOYMENT_ENVIRONMENT"] = "prod"
-    from conditional_plm.oracles import ThermoOracle
-    from conditional_plm.data.capulet import get_capulet_reference_sequence
-    from conditional_plm.data.humanness import biophi_v_humannesses, DEFAULT_MIN_PERCENT_SUBJECTS
-
     samples = main(args)
-    therm_oracle = ThermoOracle.load_default()
-    ref_seq = get_capulet_reference_sequence()
 
+    kdpe_preds = aff_oracle.forward(samples, ref_seq)
     tm_preds = therm_oracle.forward(samples, ref_seq)
+
     biophi_objs = biophi_v_humannesses(samples)
     oasis_percentile = np.array([obj.get_oasis_percentile(DEFAULT_MIN_PERCENT_SUBJECTS / 100) for obj in biophi_objs])
     rmse_oasis_percentile = np.sqrt(np.mean(oasis_percentile - args.target_oasis_percentile)**2)
 
     df = pd.DataFrame({'sequence': samples})
     df['tm_mean'] = tm_preds.cpu().detach().numpy()
+    df['kdpe_mean'] = kdpe_preds.cpu().detach().numpy()
     df['oasis_percentile'] = oasis_percentile
-
+    
+    print(args.cond_methods)
+    print(f"Mean KDPE: {np.mean(df['kdpe_mean'])}")
     print(f"Mean TM: {np.mean(df['tm_mean'])}")
     print(f"Mean OASIS percentile: {np.mean(df['oasis_percentile'])}")
     print(f"RMSE OASIS percentile: {rmse_oasis_percentile}")
     
     df.to_csv(os.path.join(args.save_dir, f"{args.run_name}.csv"), index=False)
-    breakpoint()

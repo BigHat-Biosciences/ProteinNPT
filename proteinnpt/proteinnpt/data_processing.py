@@ -53,6 +53,7 @@ def process_batch(
     mask_training_aa = True,
     aa_can_mask = None,
     eval_mode = True,
+    sample_mode = False,
     start_idx=1,
     selected_indices_seed=0,
     indel_mode=False,
@@ -73,12 +74,19 @@ def process_batch(
     batch_gt_labels = {}
     batch_masked_targets = {} 
     batch_target_labels = {}
-    for target_name in target_names:
-        if target_name not in batch: 
+
+    for i, target_name in enumerate(target_names):
+        if target_name not in batch:
             if verbose: print("Target values were not passed in input batch. We assume all corresponding values are missing & to be predicted.")
             batch[target_name] = torch.tensor([np.nan] * number_of_mutated_seqs_to_score) # By construction this will set all labels to -100 in subsequent mask_targets.
             eval_mode = True
         batch_gt_labels[target_name] = batch[target_name].clone()
+
+        if sample_mode:
+            cond_method = args.cond_methods[i]
+            if cond_method == "mask":
+                proba_target_mask = 1.0
+
         if target_name in target_names_unknown:
             # These are the targets that we actually care about and want to predict
             masked_targets, target_labels = mask_targets(
@@ -92,6 +100,7 @@ def process_batch(
                 min_num_labels_masked = 1 if not eval_mode else None # Masking at least one label during training to have well-defined loss
             )
         else:
+            # These are for auxiliary targets that aren't apart of the loss
             masked_targets, target_labels = mask_targets(
                 inputs = batch[target_name],
                 input_target_type = args.target_config[target_name]["type"], 

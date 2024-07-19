@@ -803,6 +803,7 @@ class Trainer():
                 proba_aa_mask = proba_aa_mask,              # Mask amino acids with this probability
                 aa_can_mask=full_sample_mask,               # Only mask amino acids at these positions
                 eval_mode = True,
+                sample_mode = True,
                 mask_training_aa = False,                   # Do not mask training amino acids during eval
                 device=self.model.device,
                 selected_indices_seed=0,

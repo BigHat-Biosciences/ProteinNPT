@@ -249,6 +249,7 @@ def preprocess_training_targets(training_targets, target_config, verbose=True, o
                 training_targets[target_name] = torch.tensor([category_to_index[val] for val in training_targets[target_name]])
             target_processing[target_name]['category_to_index'] = category_to_index
             target_processing[target_name]['index_to_category'] = index_to_category
+
     if verbose: print("Target processing train set: {}".format(target_processing))
     return training_targets, target_processing
 
