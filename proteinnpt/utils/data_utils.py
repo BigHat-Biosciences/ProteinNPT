@@ -101,7 +101,7 @@ def get_dataset_from_csv_file(args, assay_file_name, metadata_cols=[], sequence_
     return data, target_processing
 
 
-def get_train_val_test_data(args, assay_file_names, metadata_cols=[]):
+def get_train_val_test_data(args, assay_file_names, metadata_cols=[], target_processing=None):
     target_names = args.target_config.keys() 
     assay_data={}
     merge = None

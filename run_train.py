@@ -95,7 +95,7 @@ def main(args):
     num_targets = len(target_names)
     num_targets_input = len(target_names_input)
     
-    print("We want to predict {} target(s): {}".format(num_targets, ' and '.join(target_names)))
+    print("We want to predict {} target(s): {}".format(num_targets, ', '.join(target_names)))
     assert num_targets == num_targets_input, "Number of targets in target_config and target_config_input do not match"
 
     assay_id = args.train_data_location.split(".csv")[0].split(os.sep)[-1]
@@ -334,7 +334,9 @@ if __name__ == "__main__":
     parser.add_argument('--num_avg_mutations', default=6., type=float, help='Number of average mutations in the generated sequences')
     parser.add_argument('--target_oasis_percentile', default=None, type=float, help='Target OASIS percentile')
     parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context')
-    
+    parser.add_argument('--use_cc_loss', type=str2bool, nargs='?', const=True, default=True, help='Whether to use CC loss')
+    parser.add_argument('--use_directionality_loss', type=str2bool, nargs='?', const=True, default=True, help='Whether to use directionality loss')
+
     parser.add_argument('--eval_cg_from_seed', type=str2bool, nargs='?', const=True, default=True, help='Whether to evaluate from seed')
     parser.add_argument('--eval_num_random_training_sequences', default=0, type=int, help='Number of random training sequences to be leveraged at inference time')
     parser.add_argument('--eval_num_closest_oasis_training_sequences', default=0, type=int, help='Number of most human like training sequences to be leveraged at inference time')
