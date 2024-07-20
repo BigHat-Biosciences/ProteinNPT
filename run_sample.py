@@ -298,12 +298,10 @@ if __name__ == "__main__":
     parser.add_argument('--cond_methods', default=["mean+1std"], type=str, nargs='+', help='Conditioning methods')
     parser.add_argument('--num_avg_mutations', default=6., type=float, help='Number of average mutations in the generated sequences')
     parser.add_argument('--target_oasis_percentile', default=None, type=float, help='Target OASIS percentile')
-    parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context')
     
     parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context')
     parser.add_argument('--eval_num_closest_aligned_sequences', default=0, type=int, help='Number of closest aligned sequences to the target sequence to be leveraged at inference time')
     parser.add_argument('--eval_num_random_training_sequences', default=0, type=int, help='Number of random training sequences to be leveraged at inference time')
-    parser.add_argument('--eval_num_closest_aligned_sequences', default=0, type=int, help='Number of closest aligned sequences to the target sequence to be leveraged at inference time')
     parser.add_argument('--eval_num_closest_oasis_training_sequences', default=0, type=int, help='Number of most human like training sequences to be leveraged at inference time')
     parser.add_argument('--eval_num_closest_fitness_training_sequences', default=0, type=int, help='Number of closest training sequences to the target sequence by fitness to be leveraged at inference time')
     parser.add_argument('--eval_num_training_sequences_per_batch_per_gpu', default=None, type=int, help='Number of sequences from training (with label) at inference time [ProteinNPT only]')
