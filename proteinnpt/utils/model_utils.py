@@ -123,7 +123,8 @@ class Trainer():
 
         if self.distributed_training:
             print("Running in distributed mode!")
-            # TODO: Implement weighted distributed sampler if we really want to run in distributed mode
+            from torch.distributed import init_process_group
+            init_process_group(backend='nccl')
             self.model = torch.nn.parallel.DistributedDataParallel(self.model)
             train_sampler = torch.utils.data.distributed.DistributedSampler(self.train_data)
         elif 'sampling_weight' in self.train_data.features:
@@ -168,8 +169,12 @@ class Trainer():
         log_train_total_loss = 0
         if self.model.model_type=="ProteinNPT":
             log_train_reconstruction_loss, log_train_num_masked_tokens = 0, 0
-            log_train_num_cc_targets_dict, log_train_self_consistency_loss_dict = defaultdict(int), defaultdict(int)
-            log_train_num_signed_conds_dict, log_train_directionality_loss_dict = defaultdict(int), defaultdict(int)
+
+            if self.args.use_cc_loss:
+                log_train_num_cc_targets_dict, log_train_self_consistency_loss_dict = defaultdict(int), defaultdict(int)
+                if self.args.use_directionality_loss:
+                    log_train_num_signed_conds_dict, log_train_directionality_loss_dict = defaultdict(int), defaultdict(int)
+
             log_train_num_target_masked_tokens_dict = defaultdict(int)
         else:
             log_num_sequences_predicted = 0
@@ -210,9 +215,9 @@ class Trainer():
                         training_sequences = None,
                         proba_target_mask = 0.15,
                         proba_aa_mask = 0.15,
-                        proba_unchanged=0.1,
-                        proba_random_mutation=0.1,
-                        proba_random_unmasked_mutation=(0.5-reconstruction_loss_coeff),
+                        proba_unchanged = 0.1,
+                        proba_random_mutation = 0.1,
+                        proba_random_unmasked_mutation = 0.15,
                         eval_mode = False,
                         device=self.model.device,
                         indel_mode=self.args.indel_mode
@@ -262,20 +267,21 @@ class Trainer():
                     flipped_target_tensor[:, 1] = 1.0 - flipped_target_tensor[:, 1]
                     unmasked_targets[target_name] = flipped_target_tensor
 
-                cc_output = self.model(
-                    tokens=unmasked_tokens,
-                    targets=unmasked_targets,
-                    zero_shot_fitness_predictions=zero_shot_fitness_predictions,
-                    sequence_embeddings=processed_batch['sequence_embeddings']
-                )
-
-                total_cc_loss, self_consistency_loss_dict, directionality_loss_dict, num_cc_targets_dict, num_signed_conds_dict =\
-                    self.model.self_consistency_loss(
-                        gt_labels = processed_batch['gt_labels'],
-                        masked_targets = processed_batch['masked_targets'],
-                        target_predictions = cc_output['target_predictions'],
-                        self_consistency_loss_weight = 1.0 - reconstruction_loss_coeff,
+                if self.args.use_cc_loss:
+                    cc_output = self.model(
+                        tokens=unmasked_tokens,
+                        targets=unmasked_targets,
+                        zero_shot_fitness_predictions=zero_shot_fitness_predictions,
+                        sequence_embeddings=processed_batch['sequence_embeddings']
                     )
+
+                    total_cc_loss, self_consistency_loss_dict, directionality_loss_dict, num_cc_targets_dict, num_signed_conds_dict =\
+                        self.model.self_consistency_loss(
+                            gt_labels = processed_batch['gt_labels'],
+                            masked_targets = processed_batch['masked_targets'],
+                            target_predictions = cc_output['target_predictions'],
+                            self_consistency_loss_weight = 1.0 - reconstruction_loss_coeff,
+                        )
 
                 total_npt_loss, reconstruction_loss, target_prediction_loss_dict = self.model.protein_npt_loss(
                     token_predictions_logits=output['logits_protein_sequence'], 
@@ -289,10 +295,14 @@ class Trainer():
                 if total_npt_loss.item() > 10.0 and training_step >= 100:
                     print("High training loss detected: {}".format(total_npt_loss.item()))
 
-                if total_cc_loss.item() > 10.0 and training_step >= 100:
-                    print("High training cc loss detected: {}".format(total_cc_loss.item()))
+                if self.args.use_cc_loss:
+                    if total_cc_loss.item() > 10.0 and training_step >= 100:
+                        print("High training cc loss detected: {}".format(total_cc_loss.item()))
 
-                total_loss = total_npt_loss + total_cc_loss                
+                    total_loss = total_npt_loss + total_cc_loss
+                else:
+                    total_loss = total_npt_loss
+
                 total_loss.backward()
             
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_norm_clip)
@@ -304,11 +314,23 @@ class Trainer():
             else:
                 optimizer.step()
 
-            log_train_total_loss += total_loss
+            target_prediction_loss_dict = {k: v.detach().cpu() for k,v in target_prediction_loss_dict.items()}
+            if self.args.use_cc_loss:
+                self_consistency_loss_dict = {k: v.detach().cpu() for k,v in self_consistency_loss_dict.items()}
+                num_cc_targets_dict = {k: v.detach().cpu() for k,v in num_cc_targets_dict.items()}
+                if self.args.use_directionality_loss:
+                    directionality_loss_dict = {k: v.detach().cpu() for k,v in directionality_loss_dict.items()}
+                    num_signed_conds_dict = {k: v.detach().cpu() for k,v in num_signed_conds_dict.items()}
+
+            reconstruction_loss = reconstruction_loss.detach().cpu()
+            total_loss = total_loss.detach().cpu()
+
+            log_train_total_loss += total_loss.item()
+
             if self.model.model_type=="ProteinNPT": 
                 num_masked_tokens_in_batch = (~processed_batch['token_labels'].eq(-100)).sum().item()
                 log_train_num_masked_tokens += num_masked_tokens_in_batch
-                log_train_reconstruction_loss += reconstruction_loss * num_masked_tokens_in_batch
+                log_train_reconstruction_loss += reconstruction_loss.cpu() * num_masked_tokens_in_batch
                 
                 for target_name in self.model.target_names:
                     if self.args.target_config[target_name]["type"]=="continuous":
@@ -317,18 +339,20 @@ class Trainer():
                         num_masked_tokens_target_in_batch = processed_batch['masked_targets'][target_name].eq(self.args.target_config[target_name]["dim"]).sum().item() # Index of mask is exactly self.args.target_config[target_name]["dim"] (largest value possible)
                     
                     log_train_num_target_masked_tokens_dict[target_name] += num_masked_tokens_target_in_batch
-                    log_train_target_prediction_loss_dict[target_name] += target_prediction_loss_dict[target_name] * num_masked_tokens_target_in_batch
+                    log_train_target_prediction_loss_dict[target_name] += target_prediction_loss_dict[target_name] * num_masked_tokens_target_in_batch                            
 
-                    log_train_num_cc_targets_dict[target_name] += num_cc_targets_dict[target_name]
-                    log_train_num_signed_conds_dict[target_name] += num_signed_conds_dict[target_name]
-                    log_train_self_consistency_loss_dict[target_name] += self_consistency_loss_dict[target_name] * num_cc_targets_dict[target_name]
-                    log_train_directionality_loss_dict[target_name] += directionality_loss_dict[target_name] * num_signed_conds_dict[target_name]
+                    if self.args.use_cc_loss:
+                        log_train_num_cc_targets_dict[target_name] += num_cc_targets_dict[target_name]
+                        log_train_self_consistency_loss_dict[target_name] += self_consistency_loss_dict[target_name] * num_cc_targets_dict[target_name]
+                        if self.args.use_directionality_loss:
+                            log_train_num_signed_conds_dict[target_name] += num_signed_conds_dict[target_name]
+                            log_train_directionality_loss_dict[target_name] += directionality_loss_dict[target_name] * num_signed_conds_dict[target_name]
             else:
                 log_num_sequences_predicted += len(batch['mutant_mutated_seq_pairs'])
                 for target_name in self.model.target_names:
                     log_train_target_prediction_loss_dict[target_name] += target_prediction_loss_dict[target_name] * len(batch['mutant_mutated_seq_pairs'])
             
-            if training_step % self.args.num_logging_training_steps == 0 and self.args.use_wandb:
+            if training_step % self.args.num_logging_training_steps == 0:
                 time_end_step = time.time()
                 delta_time_since_last_log = time_end_step - prior_log_time
                 total_train_time += delta_time_since_last_log
@@ -338,26 +362,34 @@ class Trainer():
                     "reconstruction_loss_coeff": reconstruction_loss_coeff,
                     "step_time": delta_time_since_last_log / (self.args.num_logging_training_steps)
                 }
-                if self.model.model_type=="ProteinNPT": 
+                if self.model.model_type=="ProteinNPT":
                     train_logs["train_total_loss_per_step"]: log_train_total_loss / self.args.num_logging_training_steps
                     train_logs["train_reconstruction_loss_per_masked_token"] = log_train_reconstruction_loss.item() / log_train_num_masked_tokens
                     for target_name in self.model.target_names:
                         train_logs["train_prediction_"+str(target_name)+"_loss_per_masked_token"] = log_train_target_prediction_loss_dict[target_name].item() / log_train_num_target_masked_tokens_dict[target_name]
-                        train_logs["train_self_consistency_"+str(target_name)+"_loss_per_cc_target"] = log_train_self_consistency_loss_dict[target_name].item() / log_train_num_cc_targets_dict[target_name]
-                        train_logs["train_directionality_"+str(target_name)+"_loss_per_signed_cond"] = log_train_directionality_loss_dict[target_name].item() / log_train_num_signed_conds_dict[target_name]
+                        
+                        if self.args.use_cc_loss:
+                            train_logs["train_self_consistency_"+str(target_name)+"_loss_per_cc_target"] = log_train_self_consistency_loss_dict[target_name].item() / log_train_num_cc_targets_dict[target_name]
+                            if self.args.use_directionality_loss:
+                                train_logs["train_directionality_"+str(target_name)+"_loss_per_signed_cond"] = log_train_directionality_loss_dict[target_name].item() / log_train_num_signed_conds_dict[target_name]
                 else:
                     train_logs["train_total_loss_per_seq"]: log_train_total_loss / log_num_sequences_predicted
                     for target_name in self.model.target_names:
                         train_logs["train_prediction_"+str(target_name)+"_loss_per_seq"] = log_train_target_prediction_loss_dict[target_name] / log_num_sequences_predicted
                 
-                wandb.log(train_logs)
+                if self.args.use_wandb:
+                    wandb.log(train_logs)
+                
                 log_train_total_loss = 0
                 log_train_target_prediction_loss_dict = defaultdict(int)
                 if self.model.model_type=="ProteinNPT":
                     log_train_reconstruction_loss, log_train_num_masked_tokens = 0, 0
                     log_train_num_target_masked_tokens_dict = defaultdict(int)
-                    log_train_num_cc_targets_dict, log_train_self_consistency_loss_dict = defaultdict(int), defaultdict(int)
-                    log_train_num_signed_conds_dict, log_train_directionality_loss_dict = defaultdict(int), defaultdict(int)
+
+                    if self.args.use_cc_loss:
+                        log_train_num_cc_targets_dict, log_train_self_consistency_loss_dict = defaultdict(int), defaultdict(int)
+                        if self.args.use_directionality_loss:
+                            log_train_num_signed_conds_dict, log_train_directionality_loss_dict = defaultdict(int), defaultdict(int)
                 else:
                     log_num_sequences_predicted = 0 
                 

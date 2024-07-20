@@ -9,7 +9,7 @@ import torch
 
 from proteinnpt.proteinnpt.model import ProteinNPTModel
 from proteinnpt.utils.esm.data import Alphabet
-from proteinnpt.utils.data_utils import get_train_val_test_data, get_dataset_from_csv_file
+from proteinnpt.utils.data_utils import get_dataset_from_csv_file, pnpt_spearmanr
 from proteinnpt.utils.model_utils import Trainer
 
 
@@ -191,7 +191,6 @@ if __name__ == "__main__":
         help='Name of the run'
     )
     
-    parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context data')
     parser.add_argument('--context_data_location', default=None, type=str, help='Path to context data file')
     parser.add_argument('--assay_data_location', required=True, type=str, help='Path to assay data file')
 
@@ -207,7 +206,8 @@ if __name__ == "__main__":
     
     parser.add_argument('--aho_aligned', type=str2bool, nargs='?', const=True, default=False, help='Whether the Aho aligned sequences are used')
     parser.add_argument('--target_oasis_percentile', default=None, type=float, help='Target OASIS percentile')
-    
+    parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context')
+
     parser.add_argument('--eval_num_closest_aligned_sequences', default=0, type=int, help='Number of closest aligned sequences to be leveraged at inference time')
     parser.add_argument('--eval_num_random_training_sequences', default=0, type=int, help='Number of random training sequences to be leveraged at inference time')
     parser.add_argument('--eval_num_training_sequences_per_batch_per_gpu', default=None, type=int, help='Number of sequences from training (with label) at inference time [ProteinNPT only]')
@@ -281,6 +281,9 @@ if __name__ == "__main__":
     os.environ["DEPLOYMENT_ENVIRONMENT"] = "prod"
 
     preds = main(args)
+    sp = pnpt_spearmanr(np.array(preds["predictions_fitness1"]), np.array(preds["labels_fitness1"]))
+    print(f"Spearman correlation: {sp.correlation:.4f}")
+
     breakpoint()
     
     df = pd.DataFrame(preds)

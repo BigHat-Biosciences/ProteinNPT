@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from pprint import pprint
 import torch
+from pprint import pprint
 
 from proteinnpt.proteinnpt.model import ProteinNPTModel
 from proteinnpt.utils.esm.data import Alphabet
@@ -40,6 +41,11 @@ def setup_config_and_paths(args):
     args.assay_data_location = os.path.join(args.input_dir, args.assay_data_location)                       # .csv file
     args.assay_data_folder = [ os.sep.join(args.assay_data_location.split(os.sep)[:-1]) ]                   # For now, we only support one assay target
     
+    args.target_processing_location = None
+    if args.target_processing_filename is not None:
+        breakpoint()
+        args.target_processing_location = os.path.join(args.input_dir, args.target_processing_filename)
+
     ############################# SETUP MODEL CONFIG #############################
     if args.model_config_location is not None:
         args.main_config=json.load(open(args.model_config_location))
@@ -109,7 +115,7 @@ def main(args):
     MSA_start_position = args.MSA_start
     MSA_end_position = args.MSA_end
     
-    if os.path.exists(args.target_processing_location):
+    if args.target_processing_location and os.path.exists(args.target_processing_location):
         target_processing = json.load(open(args.target_processing_location))
         train_data, _ = get_dataset_from_csv_file(args, args.assay_data_location, args.metadata_cols, target_processing=target_processing)
     else:
@@ -144,7 +150,7 @@ def main(args):
         model=model,
         args=args,
         train_data=train_data, 
-        val_datas=[],
+        val_datas=None,
         MSA_sequences=None, 
         MSA_weights=None,
         MSA_start_position=MSA_start_position,
@@ -158,15 +164,10 @@ def main(args):
         checkpoint_location = args.output_dir + os.sep + 'checkpoint.t7'
         assert os.path.exists(checkpoint_location), f"Checkpoint file {checkpoint_location} not found"
         checkpoint = torch.load(checkpoint_location)
-        # load the state dictionary into your model
         model.load_state_dict(checkpoint['state_dict'], strict=False)
-        trainer_final_status = {
-            'total_training_steps': -1,
-            'total_training_epochs': -1,
-            'total_train_time': -1
-        }
         model.cuda()
         model.set_device()
+        print("Model loaded from checkpoint")
 
     selected_indices = []
 
@@ -279,6 +280,7 @@ if __name__ == "__main__":
         help='Name of the run'
     )
     
+    parser.add_argument('--target_processing_filename', default=None, type=str, help='Name of the target processing file')
     parser.add_argument('--assay_data_location', default="datum.csv", type=str, help='Path to assay data file')
     parser.add_argument('--metadata_cols', default=[], type=str, nargs='+', help='Columns to use as metadata')
     parser.add_argument('--model_config_name', default="model_config.json", type=str, help='Model configuration file name')
@@ -296,10 +298,12 @@ if __name__ == "__main__":
     parser.add_argument('--cond_methods', default=["mean+1std"], type=str, nargs='+', help='Conditioning methods')
     parser.add_argument('--num_avg_mutations', default=6., type=float, help='Number of average mutations in the generated sequences')
     parser.add_argument('--target_oasis_percentile', default=None, type=float, help='Target OASIS percentile')
+    parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context')
     
     parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context')
     parser.add_argument('--eval_num_closest_aligned_sequences', default=0, type=int, help='Number of closest aligned sequences to the target sequence to be leveraged at inference time')
     parser.add_argument('--eval_num_random_training_sequences', default=0, type=int, help='Number of random training sequences to be leveraged at inference time')
+    parser.add_argument('--eval_num_closest_aligned_sequences', default=0, type=int, help='Number of closest aligned sequences to the target sequence to be leveraged at inference time')
     parser.add_argument('--eval_num_closest_oasis_training_sequences', default=0, type=int, help='Number of most human like training sequences to be leveraged at inference time')
     parser.add_argument('--eval_num_closest_fitness_training_sequences', default=0, type=int, help='Number of closest training sequences to the target sequence by fitness to be leveraged at inference time')
     parser.add_argument('--eval_num_training_sequences_per_batch_per_gpu', default=None, type=int, help='Number of sequences from training (with label) at inference time [ProteinNPT only]')
@@ -442,7 +446,7 @@ if __name__ == "__main__":
 
     print(f"Mean KDPE: {np.mean(df['kdpe_mean'])}")
     print(f"Mean TM: {np.mean(df['tm_mean'])}")
+    print(f"Mean KDPE: {np.mean(df['aff_mean'])}")
     print(f"Mean OASIS percentile: {np.mean(df['oasis_percentile'])}")
-    print(f"RMSE OASIS percentile: {rmse_oasis_percentile}")
     
     df.to_csv(os.path.join(args.save_dir, f"{args.run_name}.csv"), index=False)
