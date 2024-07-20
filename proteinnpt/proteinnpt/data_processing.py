@@ -86,6 +86,8 @@ def process_batch(
             cond_method = args.cond_methods[i]
             if cond_method == "mask":
                 proba_target_mask = 1.0
+            else:
+                proba_target_mask = 0.0
 
         if target_name in target_names_unknown:
             # These are the targets that we actually care about and want to predict

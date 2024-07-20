@@ -413,10 +413,6 @@ if __name__ == "__main__":
     seed_kdpe = aff_oracle.forward([clean_target_seq], ref_seq).cpu().detach().item()
     seed_oasis = biophi_v_humanness(clean_target_seq).get_oasis_percentile(DEFAULT_MIN_PERCENT_SUBJECTS / 100)
 
-    print(f"Seed TM: {seed_tm}")
-    print(f"Seed KDPE: {seed_kdpe}")
-    print(f"Seed OASIS percentile: {seed_oasis}")
-
     args.MSA_start = 1
     args.MSA_end = len(args.target_seq)
     args.seed_fitness_config = { "tm_mean": seed_tm, "kdpe_mean": seed_kdpe, "oasis_percentile": seed_oasis }
@@ -437,7 +433,13 @@ if __name__ == "__main__":
     df['kdpe_mean'] = kdpe_preds.cpu().detach().numpy()
     df['oasis_percentile'] = oasis_percentile
     
+    print(f"Seed Construct: {args.seed_construct}")
+    print(f"Seed TM: {seed_tm}")
+    print(f"Seed KDPE: {seed_kdpe}")
+    print(f"Seed OASIS percentile: {seed_oasis}")
+
     print(args.cond_methods)
+
     print(f"Mean KDPE: {np.mean(df['kdpe_mean'])}")
     print(f"Mean TM: {np.mean(df['tm_mean'])}")
     print(f"Mean OASIS percentile: {np.mean(df['oasis_percentile'])}")

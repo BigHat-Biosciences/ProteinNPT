@@ -16,14 +16,6 @@ export SM_MODEL_DIR="/home/ec2-user/other/slu/projects/bh-experimental/wizard_ha
 TARGET_CONFIG_NAME=fitness_tm_tagg_kdpe_oasis.json
 AHO_ALIGNED=True
 
-# SEED_CONSTRUCT="vhh-capulet-001_0719_no-tag_5662"
-# SEED_CONSTRUCT="vhh-capulet-001_0719_no-tag_6440"
-# SEED_CONSTRUCT="vhh-capulet-001_0719_no-tag_7275"
-# SEED_CONSTRUCT="vhh-capulet-001_0719_no-tag_6304"
-# SEED_CONSTRUCT="vhh-capulet-001_0719_no-tag_6327"
-# SEED_CONSTRUCT="vhh-capulet-001_0719_no-tag_5682"
-# SEED_CONSTRUCT="vhh-capulet-001_0719_no-tag_6279"
-
 COND_VALUES="min P25 P50 P75 max seed"
 SEED_CONSTRUCTS="vhh-capulet-001_0719_no-tag_5662 vhh-capulet-001_0719_no-tag_6440 vhh-capulet-001_0719_no-tag_7275 vhh-capulet-001_0719_no-tag_6304 vhh-capulet-001_0719_no-tag_6327 vhh-capulet-001_0719_no-tag_5682 vhh-capulet-001_0719_no-tag_6279"
 
