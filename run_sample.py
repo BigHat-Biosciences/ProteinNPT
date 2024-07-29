@@ -182,7 +182,8 @@ def main(args):
                 target_fitness_value = target_processing[name][cond_method]
             
             if cond_method == "mask":
-                lowest_index = np.random.choice(len(train_data), args.eval_num_closest_fitness_training_sequences, replace=False)
+                # lowest_index = np.random.choice(len(train_data), args.eval_num_closest_fitness_training_sequences, replace=False)
+                lowest_index = []
             else:
                 fitness_diff = np.abs(np.array(train_data[name]) - target_fitness_value)
                 lowest_index = np.argsort(fitness_diff)[:args.eval_num_closest_fitness_training_sequences]
@@ -441,10 +442,9 @@ if __name__ == "__main__":
     print(f"Seed OASIS percentile: {seed_oasis}")
 
     print(args.cond_methods)
-
+    
     print(f"Mean KDPE: {np.mean(df['kdpe_mean'])}")
     print(f"Mean TM: {np.mean(df['tm_mean'])}")
-    print(f"Mean KDPE: {np.mean(df['aff_mean'])}")
     print(f"Mean OASIS percentile: {np.mean(df['oasis_percentile'])}")
     
     df.to_csv(os.path.join(args.save_dir, f"{args.run_name}.csv"), index=False)

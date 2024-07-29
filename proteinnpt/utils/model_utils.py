@@ -892,18 +892,18 @@ class Trainer():
         test_data = test_data.remove_columns(['mutant_mutated_seq_pairs'])
         test_data = test_data.add_column('mutant_mutated_seq_pairs', new_mutant_mutated_seq_pairs)
         
-        preds = self.predict(test_data)
-        
         logs = {}
-        for target_name in self.model.target_names:
-            mean_preds = np.array(preds['predictions_' + target_name]).mean()
-            mean_labels = np.array(preds['labels_' + target_name]).mean()
-            rmse = np.sqrt((mean_preds - mean_labels)**2)
-            sp = spearmanr(preds['predictions_' + target_name], preds['labels_' + target_name])[0]
-            logs[f"RMSE_{target_name}"] = rmse
-            logs[f"Spearman_{target_name}"] = sp
-            print(f"RMSE for {target_name}: {rmse}")
-            print(f"Spearman for {target_name}: {sp}")
+        
+        # preds = self.predict(test_data)
+        # for target_name in self.model.target_names:
+        #     mean_preds = np.array(preds['predictions_' + target_name]).mean()
+        #     mean_labels = np.array(preds['labels_' + target_name]).mean()
+        #     rmse = np.sqrt((mean_preds - mean_labels)**2)
+        #     sp = spearmanr(preds['predictions_' + target_name], preds['labels_' + target_name])[0]
+        #     logs[f"RMSE_{target_name}"] = rmse
+        #     logs[f"Spearman_{target_name}"] = sp
+        #     print(f"RMSE for {target_name}: {rmse}")
+        #     print(f"Spearman for {target_name}: {sp}")
 
         unaligned_sequences = []
         for seq in new_sequences:

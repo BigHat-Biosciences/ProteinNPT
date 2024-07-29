@@ -32,9 +32,9 @@ N=1000
 for SEED_CONSTRUCT in ${SEED_CONSTRUCTS}; do
     for COND_VALUE in ${COND_VALUES}; do
 
-        METHOD="kdpe_tm_oasis_imputed_sc"
+        METHOD="kdpe_tm_oasis_imputed_no_sc"
         SAVE_DIR="/home/ec2-user/other/slu/projects/bh-experimental/wizard_hat/conditional_plm/res/samples/${SEED_CONSTRUCT}/protnpt/${METHOD}"
-        COND_METHODS="mask mask ${COND_VALUE} min mask"
+        COND_METHODS="${COND_VALUE} min mask mask mask"
         
         python run_sample.py \
             --use_validation_set True \
@@ -59,5 +59,10 @@ for SEED_CONSTRUCT in ${SEED_CONSTRUCTS}; do
             --seed_construct ${SEED_CONSTRUCT} \
             --seed 42
 
+        ret=$?
+        if [ $ret -ne 0 ]; then
+            echo "Error in run_sample.py"
+            exit $ret
+        fi
     done
 done

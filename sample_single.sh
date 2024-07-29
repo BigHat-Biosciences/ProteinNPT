@@ -12,7 +12,7 @@ export SM_CHANNEL_TARGET_CONFIGS="/home/ec2-user/other/slu/projects/bh-experimen
 export SM_CHANNEL_TRAIN="/home/ec2-user/other/slu/projects/bh-experimental/wizard_hat/conditional_plm/res/datasets/protnpt/oas_and_disp_final"
 export SM_MODEL_DIR="/home/ec2-user/other/slu/projects/bh-experimental/wizard_hat/conditional_plm/res/models/protnpt/kdpe_tm_oasis_imputed_sc"
 
-COND_METHODS="mask mask min min mask"
+COND_METHODS="max min mask mask mask"
 TARGET_CONFIG_NAME=fitness_tm_tagg_kdpe_oasis.json
 AHO_ALIGNED=True
 
@@ -32,7 +32,7 @@ NUM_CLOSEST_OASIS_TRAIN_SEQS=0
 
 NUM_AVG_MUTATIONS=6
 NUM_RANDOM_TRAIN_SEQS=0
-NUM_CLOSEST_FITNESS_TRAIN_SEQS=1000
+NUM_CLOSEST_FITNESS_TRAIN_SEQS=0
 NUM_EVAL_TRAIN_SEQS=1000
 N=1000
 
