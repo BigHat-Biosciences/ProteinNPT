@@ -36,15 +36,14 @@ def setup_config_and_paths(args):
 
     args.model_config_location = os.path.join(args.model_config_dir, args.model_config_name)
     args.target_config_location = os.path.join(args.target_config_dir, args.target_config_name)
-    args.target_processing_location = os.path.join(args.output_dir, args.target_processing_name)
 
     args.assay_data_location = os.path.join(args.input_dir, args.assay_data_location)                       # .csv file
     args.assay_data_folder = [ os.sep.join(args.assay_data_location.split(os.sep)[:-1]) ]                   # For now, we only support one assay target
     
     args.target_processing_location = None
     if args.target_processing_filename is not None:
-        breakpoint()
-        args.target_processing_location = os.path.join(args.input_dir, args.target_processing_filename)
+        args.target_processing_location = os.path.join(args.output_dir, args.target_processing_filename)
+        assert os.path.exists(args.target_processing_location), f"Target processing file {args.target_processing_location} not found"
 
     ############################# SETUP MODEL CONFIG #############################
     if args.model_config_location is not None:
@@ -182,8 +181,8 @@ def main(args):
                 target_fitness_value = target_processing[name][cond_method]
             
             if cond_method == "mask":
-                # lowest_index = np.random.choice(len(train_data), args.eval_num_closest_fitness_training_sequences, replace=False)
-                lowest_index = []
+                lowest_index = np.random.choice(len(train_data), args.eval_num_closest_fitness_training_sequences, replace=False)
+                # lowest_index = []
             else:
                 fitness_diff = np.abs(np.array(train_data[name]) - target_fitness_value)
                 lowest_index = np.argsort(fitness_diff)[:args.eval_num_closest_fitness_training_sequences]
@@ -234,7 +233,9 @@ def main(args):
         cond_methods=args.cond_methods,
         train_data = train_data,
         proba_aa_mask = args.proba_aa_mask,
+        temperature=args.temperature,
         n=args.n,
+        sample_targets=args.sample_targets,
     )
     print(f"Generated {len(samples)} samples")
     return samples
@@ -286,7 +287,6 @@ if __name__ == "__main__":
     parser.add_argument('--metadata_cols', default=[], type=str, nargs='+', help='Columns to use as metadata')
     parser.add_argument('--model_config_name', default="model_config.json", type=str, help='Model configuration file name')
     parser.add_argument('--target_config_name', default="target_config.json", type=str, help='Target configuration file name')
-    parser.add_argument('--target_processing_name', default="target_processing.json", type=str, help='Target processing file name')
 
     parser.add_argument('--sequence_embeddings_location', default=None, type=str, help='Actual location of sequence embeddings .h5 file')
     parser.add_argument('--sequence_embeddings_folder', default=None, required=False, type=str, help='Folder with embeddings')
@@ -300,6 +300,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_avg_mutations', default=6., type=float, help='Number of average mutations in the generated sequences')
     parser.add_argument('--target_oasis_percentile', default=None, type=float, help='Target OASIS percentile')
     
+    parser.add_argument('--sample_targets', default=None, type=str, nargs='+', help='Should we sample the target conditional values or use fixed values. If not None, provide a list with same length as number of targets. Each item is standard deviation used to sample around cond_method mean')
     parser.add_argument('--use_assay_data_as_context', type=str2bool, nargs='?', const=True, default=False, help='Whether to use assay data as context')
     parser.add_argument('--eval_num_closest_aligned_sequences', default=0, type=int, help='Number of closest aligned sequences to the target sequence to be leveraged at inference time')
     parser.add_argument('--eval_num_random_training_sequences', default=0, type=int, help='Number of random training sequences to be leveraged at inference time')
@@ -311,6 +312,7 @@ if __name__ == "__main__":
     parser.add_argument('--target_seq', default=None, type=str, help='WT sequence mutated in the assay')
     parser.add_argument('--target_seq_mutable_mask', default=None, type=str2bool, nargs='+', help='Mask of mutable positions in the target sequence')
     parser.add_argument('--target_seq_cdr_mask', default=None, type=str, nargs='+', help='Mask of CDR positions in the target sequence')
+    parser.add_argument('--temperature', default=1.0, type=float, help='Temperature for sampling')
     ############################# SAGEMAKER PARAMETERS #############################
     
     # Data parameters
@@ -391,9 +393,13 @@ if __name__ == "__main__":
         get_capulet_reference_sequence
     )
 
-    seed_seq = ConstructSvc.get_by_name(args.seed_construct).get_part_aa_sequence()
-    ref_seq = get_capulet_reference_sequence()
+    if args.target_seq is None:
+        seed_seq = ConstructSvc.get_by_name(args.seed_construct).get_part_aa_sequence()
+    else:
+        seed_seq = args.target_seq.replace("-", "")
 
+    print(f"Seed sequence: {seed_seq}")
+    ref_seq = get_capulet_reference_sequence()
     therm_oracle = ThermoOracle.load_default()
     aff_oracle = AffinityOracle.load_default()
     

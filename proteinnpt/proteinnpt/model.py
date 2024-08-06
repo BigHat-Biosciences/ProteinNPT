@@ -416,6 +416,7 @@ class ProteinNPTModel(nn.Module):
                     # We don't have any unmasked values for this target, so we can't compute a self-consistency loss
                     self_consistency_loss[target_name] = torch.tensor(0.0)
                     directionality_loss[target_name] = torch.tensor(0.0)
+                    num_signed_conditionals[target_name] = torch.tensor(0)
                 else:
                     conditional_target_values = masked_targets[target_name][cc_unmasked_locations][:,0]
                     ground_truth_target_values = gt_labels[target_name].to(self.device)[cc_unmasked_locations]

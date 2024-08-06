@@ -37,6 +37,10 @@ def setup_config_and_paths(args):
     args.model_config_location = os.path.join(args.model_config_dir, args.model_config_name)
     args.target_config_location = os.path.join(args.target_config_dir, args.target_config_name)
     args.assay_data_folder = os.sep.join(args.assay_data_location.split(os.sep)[:-1])
+
+    args.target_processing_location = None
+    if args.target_processing_filename is not None:
+        args.target_processing_location = os.path.join(args.output_dir, args.target_processing_filename)
     
     ############################# SETUP MODEL CONFIG #############################
     if args.model_config_location is not None:
@@ -101,12 +105,20 @@ def main(args):
 
     ############################# GET TRAINING DATA #################################
     if args.context_data_location is not None:
-        # Use the provided context data file sequences as context data and normalization data
-        context_data, target_processing = get_dataset_from_csv_file(args, args.context_data_location, args.metadata_cols)
+        if args.target_processing_location and os.path.exists(args.target_processing_location):
+            target_processing = json.load(open(args.target_processing_location))
+            context_data, _ = get_dataset_from_csv_file(args, args.context_data_location, args.metadata_cols, target_processing=target_processing)
+        else:
+            context_data, target_processing = get_dataset_from_csv_file(args, args.context_data_location, args.metadata_cols)
+        
         eval_data, assay_target_processing = get_dataset_from_csv_file(args, args.assay_data_location, args.metadata_cols, target_processing=target_processing)
     else:
         args.use_assay_data_as_context = True
-        eval_data, target_processing = get_dataset_from_csv_file(args, args.assay_data_location, args.metadata_cols)
+        if args.target_processing_location and os.path.exists(args.target_processing_location):
+            target_processing = json.load(open(args.target_processing_location))
+            eval_data, _ = get_dataset_from_csv_file(args, args.assay_data_location, args.metadata_cols, target_processing=target_processing)
+        else:
+            eval_data, target_processing = get_dataset_from_csv_file(args, args.assay_data_location, args.metadata_cols)
 
     if args.use_assay_data_as_context:
         from copy import deepcopy
@@ -191,6 +203,7 @@ if __name__ == "__main__":
         help='Name of the run'
     )
     
+    parser.add_argument('--target_processing_filename', default=None, type=str, help='Name of the target processing file')
     parser.add_argument('--context_data_location', default=None, type=str, help='Path to context data file')
     parser.add_argument('--assay_data_location', required=True, type=str, help='Path to assay data file')
 
@@ -281,8 +294,9 @@ if __name__ == "__main__":
     os.environ["DEPLOYMENT_ENVIRONMENT"] = "prod"
 
     preds = main(args)
-    sp = pnpt_spearmanr(np.array(preds["predictions_fitness1"]), np.array(preds["labels_fitness1"]))
-    print(f"Spearman correlation: {sp.correlation:.4f}")
+    # sp = pnpt_spearmanr(np.array(preds["predictions_kdpe_mean"]), np.array(preds["labels_kdpe_mean"]))
+    # sp = pnpt_spearmanr(np.array(preds["predictions_tm_mean"]), np.array(preds["labels_tm_mean"]))
+    # print(f"Spearman correlation: {sp.correlation:.4f}")
 
     breakpoint()
     

@@ -481,6 +481,7 @@ class Trainer():
                         return_logs=True
                     )
 
+                    print()
                     for oracle_fn_name, oracle_fn in self.cg_oracle_fns.items():
                         try:
                             oracle_scores = oracle_fn(samples)
@@ -491,6 +492,7 @@ class Trainer():
                         except Exception as e:
                             print(f"Oracle function {oracle_fn_name} failed with error: {e}")
                             pass
+                    print()
                     
                     if self.args.use_wandb:
                         target_names = self.target_processing.keys()
@@ -783,7 +785,8 @@ class Trainer():
         proba_aa_mask = 0.05217391304347826,
         temperature = 1.0,
         n=1000,
-        return_logs = False
+        return_logs = False,
+        sample_targets = None,
     ):
         import proteinnpt
         from datasets import Dataset
@@ -794,7 +797,7 @@ class Trainer():
         self.model.cuda()
         self.model.set_device()
 
-        test_data = create_seed_val_data(self.args, self.target_processing, cond_methods, n=n)
+        test_data = create_seed_val_data(self.args, self.target_processing, cond_methods, n=n, sample_targets=sample_targets)
         train_data_size = len(train_data['mutant_mutated_seq_pairs'])
 
         lead_seq, cdr_mask = self.args.target_seq, self.args.target_seq_cdr_mask

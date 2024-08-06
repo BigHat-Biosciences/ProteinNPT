@@ -48,7 +48,8 @@ def setup_config_and_paths(args):
     args.assay_data_folder = args.input_dir
     args.target_processing_location = None
     if args.target_processing_filename is not None:
-        args.target_processing_location = os.path.join(args.input_dir, args.target_processing_filename)
+        args.target_processing_location = os.path.join(args.model_checkpoint_dir, args.target_processing_filename)
+        
     args.train_data_location = os.path.join(args.input_dir, args.train_data_filename)
     args.eval_data_locations = [os.path.join(args.input_dir, f) for f in args.eval_data_filenames]
     args.test_data_location = os.path.join(args.input_dir, args.test_data_filename) if args.test_data_filename is not None else None
@@ -131,6 +132,7 @@ def main(args):
     for target_name, target_config in args.target_config.items():
         assert target_name in target_processing, f"Target {target_name} not found in target processing"
         target_stats = target_processing[target_name]
+        target_processing[target_name]["mask"] = np.inf
         print(f"Target: {target_name}")
         pprint(target_config)
         pprint(target_stats)
@@ -411,48 +413,56 @@ if __name__ == "__main__":
     args = parser.parse_args()
     setup_config_and_paths(args)
     
-    if args.aho_aligned:
-        args.target_seq = "KVQLVES-GGGVVQPGGSLRLSCAASG-FSFRN-----FGMSWVRQAPGKGPEWVSAISGS---GADTLYASPVKGRFIISRDNAKNTLYLQMNSLRPEDTAVYYCTIGGS------------------------LTRSSQGTLVTVSS---"
-        args.target_seq_mutable_mask = [True, True, True, True, True, True, True, False, True, True, True, True, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, True, \
-                                        True, False, True, True, True, True, True, False, False, False, False, False, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, True, True, \
-                                        True, True, True, True, True, True, True, True, False, False, False, True, True, True, \
-                                        False, True, False, True, True, True, True, False, False, True, True, True, True, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, \
-                                        False, False, False, False, False, False, False, False, False, False, False, False, False, \
-                                        False, False, False, False, False, False, False, False, False, False, False, True, True, \
-                                        True, True, True, True, True, True, True, True, True, True, True, True, False, False, False]
-        args.target_seq_cdr_mask = [False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, True, True, True, True, True, True, True, True, True, True, \
-                                                False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, True, True, True, True, True, True, True, True, True, True, \
-                                                True, True, True, True, True, True, True, False, False, False, False, False, \
-                                                False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, False, False, False, False, False, False, False, False, \
-                                                False, False, False, True, True, True, True, True, True, True, True, False, \
-                                                False, False, False, False, False, False, False, False, False, False]
-    else:
-        args.target_seq = 'KVQLVESGGGVVQPGGSLRLSCAASGFSFRNFGMSWVRQAPGKGPEWVSAISGSGADTLYASPVKGRFIISRDNAKNTLYLQMNSLRPEDTAVYYCTIGGSLTRSSQGTLVTVSS'
-        args.target_seq_mutable_mask = [True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, False, True, False, True, True, True, True, False, False, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True]
-        args.target_seq_cdr_mask = [False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False, False, False, False]
-    
-    if args.eval_cg_from_seed:
-        clean_target_seq = args.target_seq.replace('-', '')
-        args.proba_aa_mask = args.num_avg_mutations / len(clean_target_seq)
-        assert len(args.target_seq) == len(args.target_seq_mutable_mask), \
-            "Target sequence, mutable mask and CDR mask must have the same length"
-
-    if (args.MSA_start is None) or (args.MSA_end is None):
-        args.MSA_start = 1
-        if args.target_seq:
-            args.MSA_end = len(args.target_seq)
-
-
-    ############################# START TRAINING #############################
+    ############################# SETUP SEED SEQUENCE #############################
     os.environ["PARTNER"] = "capulet"
     os.environ["DEPLOYMENT_ENVIRONMENT"] = "prod"
+    from bh.biocore.sequences.constructs import ConstructSvc
+    from conditional_plm.oracles import ThermoOracle, AffinityOracle
+    from conditional_plm.data.humanness import biophi_v_humanness, biophi_v_humannesses, DEFAULT_MIN_PERCENT_SUBJECTS
+    from conditional_plm.data.capulet import (
+        get_capulet_mutable_cdr_mask,
+        get_capulet_cdr_mask,
+        get_aho_aligned_sequence,
+        get_aho_aligned_mutable_mask,
+        get_aho_aligned_cdr_mask,
+        get_capulet_reference_sequence
+    )
 
+    if args.target_seq is None:
+        seed_seq = ConstructSvc.get_by_name(args.seed_construct).get_part_aa_sequence()
+    else:
+        seed_seq = args.target_seq.replace("-", "")
+    
+    ref_seq = get_capulet_reference_sequence()
+
+    therm_oracle = ThermoOracle.load_default()
+    aff_oracle = AffinityOracle.load_default()
+    
+    if args.aho_aligned:
+        args.target_seq = get_aho_aligned_sequence(seed_seq, "-")
+        args.target_seq_mutable_mask = get_aho_aligned_mutable_mask(args.target_seq)
+        args.target_seq_cdr_mask = get_aho_aligned_cdr_mask(args.target_seq)
+    else:
+        args.target_seq = seed_seq
+        args.target_seq_mutable_mask = get_capulet_mutable_cdr_mask(args.target_seq)
+        args.target_seq_cdr_mask = get_capulet_cdr_mask(args.target_seq)
+    
+    clean_target_seq = args.target_seq.replace('-', '')
+    args.proba_aa_mask = args.num_avg_mutations / len(clean_target_seq)
+    assert len(args.target_seq) == len(args.target_seq_mutable_mask), \
+        "Target sequence, mutable mask and CDR mask must have the same length"
+
+    seed_tm = therm_oracle.forward([clean_target_seq], ref_seq).cpu().detach().item()
+    seed_kdpe = aff_oracle.forward([clean_target_seq], ref_seq).cpu().detach().item()
+    seed_oasis = biophi_v_humanness(clean_target_seq).get_oasis_percentile(DEFAULT_MIN_PERCENT_SUBJECTS / 100)
+
+    args.MSA_start = 1
+    args.MSA_end = len(args.target_seq)
+
+    print(f"Seed Construct: {args.target_seq}")
+    print(f"Seed TM: {seed_tm}")
+    print(f"Seed KDPE: {seed_kdpe}")
+    print(f"Seed OASIS percentile: {seed_oasis}")
+
+    ############################# START TRAINING #############################
     main(args)

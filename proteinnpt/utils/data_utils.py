@@ -166,7 +166,7 @@ def get_train_val_test_data(args, assay_file_names, metadata_cols=[], target_pro
     return train_data, val_data, test_data, target_processing
 
 
-def create_seed_val_data(args, target_processing, cond_methods=[], n=1000):
+def create_seed_val_data(args, target_processing, cond_methods=[], n=1000, sample_targets=None):
     """
     Creates a Dataset object with repeated seed sequences conditioned on target values
     following the specified conditining method per target (mean+1std by default).
@@ -180,12 +180,15 @@ def create_seed_val_data(args, target_processing, cond_methods=[], n=1000):
     if len(cond_methods) != len(target_processing):
         print("WARNING: Number of condition methods does not match number of targets. Defaulting to 'mean+1std' for all targets.")
         cond_methods = ['mean+1std'] * len(target_processing)
+    if sample_targets is not None:
+        assert len(sample_targets) == len(cond_methods), "Number of sample_targets does not match number of targets"
 
     mutant_mutated_seq_pairs = [(f"mutant_{i}", args.target_seq) for i in range(n)]
     raw_targets = {target_name: {} for target_name in args.target_config.keys()}
     
     for i, (target_name, target_stats) in enumerate(target_processing.items()):
         cond_method = cond_methods[i]
+        
         if cond_method == 'mean+1std':
             assert 'mean' in target_stats and 'std' in target_stats, "Target stats not found"
             seed_value = target_stats['mean'] + target_stats['std']
@@ -202,8 +205,15 @@ def create_seed_val_data(args, target_processing, cond_methods=[], n=1000):
         # Now we standardize the seed value if needed
         if args.target_config[target_name]["standardize"]:
             seed_value = (seed_value - target_stats['mean']) / target_stats['std']
+            if sample_targets is not None and sample_targets[i] is not None:
+                sample_targets[i] = sample_targets[i] / target_stats['std']
 
-        seed_targets = torch.tensor([seed_value] * n)
+        if sample_targets is not None and sample_targets[i] is not None:
+            sample_std = sample_targets[i]
+            seed_targets = torch.distributions.Normal(loc=seed_value, scale=sample_std).sample((n,))
+        else:
+            seed_targets = torch.tensor([seed_value] * n)
+
         raw_targets[target_name] = seed_targets
     return Dataset.from_dict({
         'mutant_mutated_seq_pairs': mutant_mutated_seq_pairs,
